@@ -1,0 +1,13 @@
+# Mount the OpenAI-compatible gateway. It reads the `llm` service and serves
+# `/v1/*` from its own loopback listener on a fixed port, so it needs no realm
+# and never changes the profile's default model.
+#
+# Optional keys on this row:
+#   enabled        — false keeps the gateway inert
+#   port           — preferred listen port (default: the stored one, else 8787)
+#   apiKey         — pin a key instead of the stored one
+#   bodyLimitBytes — request body cap
+#   catalogTtlMs   — /v1/models cache lifetime
+- insert:
+    - id: dsh-openai-gateway
+      name: dsh-openai-gateway

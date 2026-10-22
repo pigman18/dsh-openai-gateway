@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OpenAI-compatible gateway",
+    "description": "Expose every model of every configured provider on one OpenAI-compatible endpoint, with a status badge in the conversation header."
+  }
+}

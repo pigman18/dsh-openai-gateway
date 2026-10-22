@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "OpenAI 兼容网关",
+    "description": "把已配置 provider 的全部模型暴露为一个 OpenAI 兼容接口，并在会话标题栏显示状态徽标。"
+  }
+}
