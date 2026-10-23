@@ -133,12 +133,19 @@ bundle 行上可选：
 | `apiKey` | 已存值 | 固定密钥，优先于已存值 |
 | `bodyLimitBytes` | `8388608` | 请求体上限 |
 | `catalogTtlMs` | `60000` | `/v1/models` 缓存时长 |
+| `retryMaxRetries` | `5` | 瞬时失败（`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE`）的重试次数，与宿主 `llm-retry` 默认一致 |
+| `retryInitialDelayMs` | `500` | 退避起始间隔 |
+| `retryMaxDelayMs` | `10000` | 退避上限；上游给出的重置点超过它就按「请稍后再来」直接失败 |
+| `silentFlushMs` | `10000` | 流式响应静默多久后提交响应头并开始保活 |
+| `keepAliveMs` | `15000` | 保活 `: keep-alive` 注释的间隔 |
 
 ## 已知边界
 
 - **外部客户端不能传图片与文件**：会话之外的调用方拿不到可持久化的附件引用，因此这部分会被丢弃，只转发文本。
 - **provider 注入的提示会原样透传**：例如账号池换号时上游返回的一行说明，会作为普通 assistant 文本出现，不会被网关吞掉或改写。
 - **没有 web server 的 profile（headless）**：没有页面与控制接口，但 `/v1/*` 仍按固定端口提供服务。
+- **长任务建议用 `stream: true`**：非流式请求在整段生成期间不会写出任何字节，任何读超时都会命中。
+- **超过 `silentFlushMs` 才失败的流式请求，错误以流内事件到达**：响应头一旦提交（为了保活），首字之前的失败只能写成 `data: {"error": …}` + `data: [DONE]`，不再有 HTTP 状态码。
 - 只绑定 `127.0.0.1`，不要把它转发到网络上。
 
 ## 许可

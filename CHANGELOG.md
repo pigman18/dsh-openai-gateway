@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.3 (2026-10-23)
+
+### Fixes
+
+- **网关比宿主脆：同一个 provider，DSH 里跑得下来，网关里第一次失败就断。** 根因是网关少了宿主已有的那一层 —— `@deepseek-ai/dsh-llm` 的 agent loop 对 `RATE_LIMIT` / `SERVER` / `TIMEOUT` / `TRANSPORT` / `EMPTY_RESPONSE` 默认重试 **5 次**、500 ms → 10 s 指数退避（抖动 0.1），并尊重上游自己给出的重置点；而网关的 `consume()` 直接把第一次失败交给调用方。于是上游一次 `14003`（模型繁忙）或 `6004`（用量超频）就是一次失败的 HTTP 请求，而宿主会等一会儿再答。
+  - **补上重试层**：`blockingCompletion` 与 `streamCompletion` 都按同一套策略重试（策略可用 `retryMaxRetries` / `retryInitialDelayMs` / `retryMaxDelayMs` 覆盖）。流式只在**尚未写出任何字节**时重试 —— 一旦有 delta 上过线，重放会让调用方看到两遍答案，此时改为如实报告。
+  - **上游给的重置点照办，但只在预算内**：`providerRetryAfterMs` ≤ `retryMaxDelayMs` 就等它，超过就当作「请稍后再来」直接失败。这和宿主 `llm-retry` 对超长 `providerRetryAfterMs` 的处置一致。
+- **限流被答成 502**：`statusForCode()` 没有 `RATE_LIMIT` 分支，落到 `default: 502`。502 读起来是「网关坏了」，OpenAI 兼容客户端要么放弃、要么立刻重试，两种都不对。现在 `RATE_LIMIT` / `QUOTA` → **429**，`TIMEOUT` → **504**，错误类型为 `rate_limit_error`，并在上游给出重置点时回 `Retry-After`（同时保留 `retry_after_seconds` 字段）。
+- **流中途失败被伪装成正常结束**：已写出字节后收到 `finish.kind === 'error'|'aborted'` 时，旧代码走到 `flush(); write({}, openAiFinish(finish))`，把一个被截断的答案标成 `finish_reason: "stop"`。现在改为在流内写一条 `data: {"error": …}` 再补 `data: [DONE]`，调用方读到的是「上游失败」而不是「连接断了」。
+- **长思考期间连接上一个字节都没有**：`flush()`（写 200 + SSE 头）只在第一个 delta 到来时才调用，首字之前**连响应头都没有**，之后也从不发注释行。一个思考几分钟的模型，在调用方的读超时看来就是死连接 —— 这也是「外部调用过一会儿就断」的直接原因。现在超过 `silentFlushMs`（默认 10 s）仍无数据就先提交响应头，然后每 `keepAliveMs`（默认 15 s）写一条 `: keep-alive` SSE 注释直到流结束。代价是：一旦提交了响应头，首字之前的失败只能以流内 error 事件表达（不再是 JSON 状态码），所以只在「沉默已经比丢状态码更危险」的时候才提交。
+- 新增回归检查 `tests/resilience.spec.mjs`（并入 `npm test`）：用可编排的假 adapter 驱动真实的 HTTP 监听器，断言「瞬时失败会重试并最终答复」「重试耗尽回 429 + Retry-After」「不可重试的失败立即回 400」「首字之后失败仍以 `[DONE]` 收尾」「安静期会发 keep-alive」。**判据是同一份测试在新旧构建上的差异**：对 `1.0.2` 跑是 **1/5**（只有「不可重试立即失败」那条本来就对），对 `1.0.3` 跑是 **5/5**；`tests/catalog-refresh.spec.mjs` 仍是 4/4。
+
+### Compatibility
+
+- 流式调用在「超过 10 秒没有首字」之后，失败会以流内 `data: {"error": …}` 的形式到达（而不是 HTTP 4xx/5xx）。这是为了让长任务不被读超时掐断；10 秒内失败的请求仍按原样回 JSON 状态码。
+- 新增可选配置：`retryMaxRetries`、`retryInitialDelayMs`、`retryMaxDelayMs`、`silentFlushMs`、`keepAliveMs`。
+
 ## 1.0.2 (2026-10-23)
 
 ### Fixes

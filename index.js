@@ -36,6 +36,27 @@ const WARM_INTERVAL_MS = 1_000
 const WARM_SETTLE_MS = 6_000
 /** Hard stop, so a profile whose providers never answer still boots. */
 const WARM_ATTEMPTS = 30
+/**
+ * Retry policy for transient adapter failures.
+ *
+ * These are the host's own defaults (`@deepseek-ai/dsh-llm`): the agent loop
+ * retries RATE_LIMIT/SERVER/TIMEOUT/TRANSPORT/EMPTY_RESPONSE up to five times
+ * with 500 ms → 10 s exponential backoff and honours the wait the upstream
+ * itself asks for. A gateway that skips this layer is strictly more fragile
+ * than the same profile talking to the same provider in DSH — a single 14003
+ * or 6004 becomes a failed HTTP request here while the host would have waited
+ * and answered.
+ */
+const RETRY_MAX_RETRIES = 5
+const RETRY_INITIAL_MS = 500
+const RETRY_MAX_MS = 10_000
+const RETRY_JITTER = 0.1
+/** The codes the host retries by default, same set, same spelling. */
+const RETRYABLE_CODES = new Set(['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'])
+/** Quiet time before a streaming response commits its headers and pings. */
+const SILENT_FLUSH_MS = 10_000
+/** Interval between SSE comments once the stream is committed and quiet. */
+const KEEPALIVE_MS = 15_000
 const KEY_PREFIX = 'sk-dsh-'
 /** Service keys for the HTTP surface, newest name first. */
 const WEB_SERVER_KEYS = ['webServer', 'httpServer']
@@ -71,6 +92,12 @@ export const inject = ['llm']
  *   apiKey         — pin the bearer key instead of the stored one
  *   bodyLimitBytes — request body cap (default 8 MiB)
  *   catalogTtlMs   — `/v1/models` cache lifetime (default 60 s)
+ *   retryMaxRetries, retryInitialDelayMs, retryMaxDelayMs
+ *                  — transient-failure retry policy (defaults are the host's:
+ *                    5 retries, 500 ms → 10 s exponential backoff)
+ *   silentFlushMs, keepAliveMs
+ *                  — how long a quiet stream may stay silent before the
+ *                    response commits and pings (defaults 10 s / 15 s)
  */
 export function apply(ctx, config) {
   const settings = config ?? {}
@@ -81,6 +108,11 @@ export function apply(ctx, config) {
     ? settings.catalogTtlMs
     : CATALOG_TTL_MS
   const enabled = settings.enabled !== false
+  const retry = resolveRetryPolicy(settings)
+  const keepAlive = {
+    silentFlushMs: positiveOr(settings.silentFlushMs, SILENT_FLUSH_MS),
+    keepAliveMs: positiveOr(settings.keepAliveMs, KEEPALIVE_MS),
+  }
 
   // Persisted state lives in one plugin-owned file under the Harness home:
   // a configured external client then survives every restart.
@@ -96,6 +128,8 @@ export function apply(ctx, config) {
     enabled,
     startedAt: Date.now(),
     catalog: { at: 0, entries: [] },
+    retry,
+    keepAlive,
     requests: 0,
     failures: 0,
     server: undefined,
@@ -633,6 +667,107 @@ function pickEffort(info, requested) {
 
 const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
+/* ----------------------------------------------------------------- retry */
+
+function positiveOr(value, fallback) {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+/** The retry policy in effect: the host's defaults, overridable per profile. */
+function resolveRetryPolicy(settings) {
+  const initialDelayMs = positiveOr(settings.retryInitialDelayMs, RETRY_INITIAL_MS)
+  const maxDelayMs = Math.max(initialDelayMs, positiveOr(settings.retryMaxDelayMs, RETRY_MAX_MS))
+  const maxRetries = Number.isInteger(settings.retryMaxRetries) && settings.retryMaxRetries >= 0
+    ? settings.retryMaxRetries
+    : RETRY_MAX_RETRIES
+  return { maxRetries, initialDelayMs, maxDelayMs, jitterRatio: RETRY_JITTER }
+}
+
+/** Whether a failure is one the host would retry. */
+function retryable(failure) {
+  return failure !== undefined && typeof failure.code === 'string' && RETRYABLE_CODES.has(failure.code)
+}
+
+/**
+ * How long to wait before retry number `retry` (1-based), or `undefined` when
+ * this failure must not be retried at all.
+ *
+ * A failure that names its own reset point is honoured only while that wait
+ * fits the budget: a fifteen-minute wait is an answer ("come back later"),
+ * not a pause this gateway should hold a caller's request open for. The host's
+ * retry policy gives up on it for exactly the same reason.
+ */
+function retryDelayMs(policy, retry, failure) {
+  if (!retryable(failure)) return undefined
+  const stated = failure.providerRetryAfterMs
+  if (typeof stated === 'number' && Number.isFinite(stated) && stated > 0) {
+    return stated <= policy.maxDelayMs ? stated : undefined
+  }
+  const exponential = Math.min(policy.initialDelayMs * 2 ** Math.min(retry - 1, 16), policy.maxDelayMs)
+  const jittered = exponential * (1 - policy.jitterRatio * Math.random())
+  return Math.max(1, Math.min(jittered, policy.maxDelayMs))
+}
+
+/** Wait, but wake immediately when the caller goes away. */
+function sleep(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted === true) {
+      resolve(false)
+      return
+    }
+    const onAbort = () => {
+      clearTimeout(timer)
+      resolve(false)
+    }
+    const timer = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort)
+      resolve(true)
+    }, ms)
+    timer.unref?.()
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
+}
+
+/* ------------------------------------------------------------- keepalive */
+
+/**
+ * Keep a long, quiet generation from looking like a dead connection.
+ *
+ * A model can think for minutes before its first delta, and an upstream can
+ * go quiet between deltas; in both windows nothing is written on the wire, and
+ * a caller whose read timeout counts silence hangs up on a request that is
+ * still healthy. After `SILENT_FLUSH_MS` the response commits its headers and
+ * an SSE comment (ignored by every OpenAI client) goes out every
+ * `KEEPALIVE_MS` until the stream ends.
+ *
+ * Committing early costs the ability to answer a pre-content failure with a
+ * JSON status, which is why it only happens once the wait has been long enough
+ * that silence is the bigger risk; `woke()` cancels the timer as soon as real
+ * data arrives.
+ */
+function startKeepAlive(res, flush, policy) {
+  let interval
+  const timer = setTimeout(() => {
+    if (res.writableEnded) return
+    flush()
+    interval = setInterval(() => {
+      if (res.writableEnded) return
+      res.write(': keep-alive\n\n')
+    }, policy.keepAliveMs)
+    interval.unref?.()
+  }, policy.silentFlushMs)
+  timer.unref?.()
+  return {
+    woke() {
+      clearTimeout(timer)
+    },
+    stop() {
+      clearTimeout(timer)
+      if (interval !== undefined) clearInterval(interval)
+    },
+  }
+}
+
 /** Pull the whole stream through one prepared call. */
 async function consume(ctx, call, signal, { dropStop }, onChunk) {
   const prepared = await prepare(ctx, call, signal, { dropStop })
@@ -672,14 +807,31 @@ async function blockingCompletion(ctx, state, res, call, signal) {
     return result
   }
 
+  // Nothing has been written to the client yet, so a transient failure can be
+  // retried exactly the way the host's agent loop would retry it.
   let result
-  try {
-    result = await runOnce(false)
-    if (stopRefused(result.finish, call.stopRequested)) result = await runOnce(true)
-  } catch (error) {
-    state.failures += 1
-    sendFailure(res, error)
-    return
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      result = await runOnce(false)
+      if (stopRefused(result.finish, call.stopRequested)) result = await runOnce(true)
+    } catch (error) {
+      const delay = attempt < state.retry.maxRetries && !signal.aborted
+        ? retryDelayMs(state.retry, attempt + 1, error)
+        : undefined
+      if (delay === undefined || !await sleep(delay, signal)) {
+        state.failures += 1
+        sendFailure(res, error)
+        return
+      }
+      logInfo(ctx, `retrying after ${messageOf(error)} in ${delay}ms (${attempt + 1}/${RETRY_MAX_RETRIES})`)
+      continue
+    }
+    const failure = result.finish?.kind === 'error' ? result.finish.failure : undefined
+    const delay = attempt < state.retry.maxRetries && !signal.aborted
+      ? retryDelayMs(state.retry, attempt + 1, failure)
+      : undefined
+    if (delay === undefined || !await sleep(delay, signal)) break
+    logInfo(ctx, `retrying after ${messageOf(failure)} in ${delay}ms (${attempt + 1}/${RETRY_MAX_RETRIES})`)
   }
 
   if (result.finish?.kind === 'error' || result.finish?.kind === 'aborted') {
@@ -748,9 +900,12 @@ async function streamCompletion(ctx, state, res, call, signal) {
     )
   }
 
+  let keepAlive
+
   const flush = () => {
     if (open) return
     open = true
+    keepAlive?.woke()
     res.writeHead(200, {
       ...corsHeaders(),
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -814,25 +969,72 @@ async function streamCompletion(ctx, state, res, call, signal) {
     })
   }
 
-  try {
-    await runOnce(false)
-    if (!open && stopRefused(finish, call.stopRequested)) await runOnce(true)
-  } catch (error) {
-    state.failures += 1
-    if (!open) {
-      sendFailure(res, error)
-      return
+  keepAlive = startKeepAlive(res, flush, state.keepAlive)
+
+  // Retry only while nothing has been written: once a delta is on the wire the
+  // caller would see the answer twice, so a failure after that point is
+  // reported rather than replayed.
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await runOnce(false)
+      if (!open && stopRefused(finish, call.stopRequested)) await runOnce(true)
+    } catch (error) {
+      const delay = !open && attempt < state.retry.maxRetries && !signal.aborted
+        ? retryDelayMs(state.retry, attempt + 1, error)
+        : undefined
+      if (delay === undefined || !await sleep(delay, signal)) {
+        keepAlive.stop()
+        state.failures += 1
+        if (!open) {
+          sendFailure(res, error)
+          return
+        }
+        // Committed already: end the stream with the error *and* the terminal
+        // marker, so the caller reads "the upstream failed" instead of
+        // "the connection dropped".
+        res.write(
+          `data: ${JSON.stringify({ error: { message: messageOf(error), type: 'server_error' } })}\n\n`,
+        )
+        res.write('data: [DONE]\n\n')
+        res.end()
+        return
+      }
+      logInfo(ctx, `retrying stream after ${messageOf(error)} in ${delay}ms (${attempt + 1}/${RETRY_MAX_RETRIES})`)
+      continue
     }
-    res.write(
-      `data: ${JSON.stringify({ error: { message: messageOf(error), type: 'server_error' } })}\n\n`,
-    )
-    res.end()
-    return
+    const failure = finish?.kind === 'error' ? finish.failure : undefined
+    const delay = !open && attempt < state.retry.maxRetries && !signal.aborted
+      ? retryDelayMs(state.retry, attempt + 1, failure)
+      : undefined
+    if (delay === undefined || !await sleep(delay, signal)) break
+    logInfo(ctx, `retrying stream after ${messageOf(failure)} in ${delay}ms (${attempt + 1}/${RETRY_MAX_RETRIES})`)
   }
+
+  keepAlive.stop()
 
   if (!open && (finish?.kind === 'error' || finish?.kind === 'aborted')) {
     state.failures += 1
     sendFailure(res, finish.failure)
+    return
+  }
+
+  // The stream is already committed, so the failure has to travel inside it.
+  // Ending with a `finish_reason: stop` here would tell the caller the answer
+  // completed when the upstream had actually cut it short.
+  if (finish?.kind === 'error' || finish?.kind === 'aborted') {
+    state.failures += 1
+    const failure = finish.failure
+    res.write(
+      `data: ${JSON.stringify({
+        error: {
+          message: messageOf(failure),
+          type: 'server_error',
+          ...(failure?.code === undefined ? {} : { code: failure.code }),
+        },
+      })}\n\n`,
+    )
+    res.write('data: [DONE]\n\n')
+    res.end()
     return
   }
 
@@ -1221,16 +1423,45 @@ function sendJson(res, status, body, extra) {
   res.end(payload)
 }
 
-function sendError(res, status, type, message, extra) {
-  sendJson(res, status, { error: { message, type, ...extra } })
+function sendError(res, status, type, message, extra, headers) {
+  sendJson(res, status, { error: { message, type, ...extra } }, headers)
+}
+
+/**
+ * `Retry-After` in whole seconds, when the failure names a wait it is worth
+ * passing on. An adapter that measured the upstream's reset point says so in
+ * `providerRetryAfterMs`; dropping it leaves the caller with a 429 and no
+ * idea when to come back.
+ */
+function retryAfterSeconds(failure) {
+  const ms = failure?.providerRetryAfterMs
+  if (typeof ms !== 'number' || !Number.isFinite(ms) || ms <= 0) return undefined
+  return Math.max(1, Math.ceil(ms / 1000))
 }
 
 function sendFailure(res, failure) {
   const code = failure?.code
   const status = typeof failure?.status === 'number' ? failure.status : statusForCode(code)
   const type =
-    status === 401 ? 'authentication_error' : status >= 500 ? 'server_error' : 'invalid_request_error'
-  sendError(res, status, type, messageOf(failure), code === undefined ? {} : { code })
+    status === 401
+      ? 'authentication_error'
+      : status === 429
+        ? 'rate_limit_error'
+        : status >= 500
+          ? 'server_error'
+          : 'invalid_request_error'
+  const retryAfter = retryAfterSeconds(failure)
+  sendError(
+    res,
+    status,
+    type,
+    messageOf(failure),
+    {
+      ...(code === undefined ? {} : { code }),
+      ...(retryAfter === undefined ? {} : { retry_after_seconds: retryAfter }),
+    },
+    retryAfter === undefined ? {} : { 'Retry-After': String(retryAfter) },
+  )
 }
 
 function statusForCode(code) {
@@ -1249,6 +1480,14 @@ function statusForCode(code) {
       return 413
     case 'IMAGE_OFFLOAD_REQUIRED':
       return 415
+    // A throttle is not a server fault: 502 tells the caller "this gateway is
+    // broken" and most clients either give up or retry immediately. 429 is the
+    // answer that makes an OpenAI-compatible client back off.
+    case 'RATE_LIMIT':
+    case 'QUOTA':
+      return 429
+    case 'TIMEOUT':
+      return 504
     default:
       return 502
   }

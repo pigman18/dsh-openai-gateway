@@ -133,12 +133,19 @@ Optional keys on the bundle row:
 | `apiKey` | stored | Pin a key instead of the stored one |
 | `bodyLimitBytes` | `8388608` | Request body cap |
 | `catalogTtlMs` | `60000` | `/v1/models` cache lifetime |
+| `retryMaxRetries` | `5` | Retries for transient failures (`RATE_LIMIT`/`SERVER`/`TIMEOUT`/`TRANSPORT`/`EMPTY_RESPONSE`), matching the host's `llm-retry` defaults |
+| `retryInitialDelayMs` | `500` | First backoff delay |
+| `retryMaxDelayMs` | `10000` | Backoff ceiling; an upstream reset point beyond it is answered, not waited out |
+| `silentFlushMs` | `10000` | How long a streaming response may stay quiet before its headers commit and pings begin |
+| `keepAliveMs` | `15000` | Interval between `: keep-alive` SSE comments |
 
 ## Known limits
 
 - **External clients cannot send images or files**: a caller outside the session has no durable attachment reference, so those parts are dropped and only text is forwarded.
 - **Provider-injected notices pass through**: for example an account-pool failover line from upstream arrives as ordinary assistant text, neither swallowed nor rewritten.
 - **A profile with no web server (headless)** has no page and no control routes, but `/v1/*` still serves on the fixed port.
+- **Prefer `stream: true` for long work**: a non-streaming request writes nothing until the whole answer is ready, so any read timeout will hit it.
+- **A streaming failure after `silentFlushMs` arrives in-stream**: once the headers are committed (to keep the connection warm), a pre-content failure can only be reported as `data: {"error": …}` + `data: [DONE]`, without an HTTP status.
 - It binds `127.0.0.1` only; do not forward it to a network.
 
 ## License
