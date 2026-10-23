@@ -56,6 +56,7 @@ function scripted(attempts) {
 let nextPort = 18990
 function mount(config, attempts) {
   const port = nextPort++
+  const webRoutes = new Map()
   let stream = scripted(attempts)
   const ctx = {
     llm: {
@@ -64,14 +65,14 @@ function mount(config, attempts) {
       prepareCall: async () => ({ config: {}, stream }),
     },
     // The chat surface lives on the gateway's own listener; the web server only
-    // carries the page's control routes, which these checks never touch.
-    get: () => undefined,
+    // carries the page's control routes (status/settings/key).
+    get: (key) => (key === 'webServer' ? { register: (route) => { webRoutes.set(route.path, route.handler); return () => {} } } : undefined),
     effect: () => {},
     on: () => () => {},
     logger: { warn: () => {}, error: () => {}, info: () => {} },
   }
   apply(ctx, { enabled: true, port, apiKey: KEY, ...config })
-  return { port }
+  return { port, webRoutes }
 }
 
 const KEY = 'sk-dsh-spec-0123456789'
@@ -111,6 +112,21 @@ function post(port, body) {
 }
 
 const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+/** Drive the page's own read of the status document. */
+function readStatus(webRoutes) {
+  return new Promise((resolve, reject) => {
+    const handler = webRoutes.get('/plugins/dsh-openai-gateway/status')
+    if (handler === undefined) { reject(new Error('status route never mounted')); return }
+    const res = {
+      headersSent: false,
+      writeHead(code, headers) { this.headersSent = true; this.code = code; this.headers = headers },
+      end(payload) { resolve(JSON.parse(String(payload ?? '{}'))) },
+      destroy() { reject(new Error('response destroyed')) },
+    }
+    handler({ method: 'GET', headers: { host: '127.0.0.1' }, url: '/plugins/dsh-openai-gateway/status' }, res)
+  })
+}
 
 const results = []
 async function check(name, run) {
@@ -187,6 +203,25 @@ await check('a quiet stream emits keep-alive comments', async () => {
   assert.ok(text.includes(': keep-alive'), `no keep-alive comment was written; body was: ${text.slice(0, 200)}`)
   assert.ok(text.includes('late'), 'the answer never arrived')
   assert.ok(text.includes('[DONE]'), 'the stream did not terminate with [DONE]')
+})
+
+// ---- 6. the status document explains the last requests ----
+await check('the status document records what each request did', async () => {
+  const ok = mount({ ...fast }, [{ chunks: [{ type: 'text-delta', text: 'fine' }] }])
+  await post(ok.port, body)
+  const bad = mount({ ...fast, retryMaxRetries: 0 }, [{ failure: { code: 'RATE_LIMIT', message: '6004 mid-stream' }, chunks: [{ type: 'text-delta', text: 'x' }] }])
+  await post(bad.port, body)
+  const payload = await readStatus(bad.webRoutes)
+  assert.ok(Array.isArray(payload.recent), 'status carries no recent list')
+  const last = payload.recent[0]
+  assert.equal(last.model, 'fake/m1')
+  assert.equal(last.stream, true)
+  assert.equal(last.outcome, 'error', `expected the failed request to be recorded, got ${JSON.stringify(last)}`)
+  assert.equal(last.code, 'RATE_LIMIT')
+  assert.ok(typeof last.ms === 'number' && last.ms >= 0, 'no duration recorded')
+  assert.ok(typeof last.firstByteMs === 'number', 'no first-byte time recorded')
+  const good = await readStatus(ok.webRoutes)
+  assert.equal(good.recent[0].outcome, 'ok', 'a successful request was not recorded as ok')
 })
 
 for (const [ok, name] of results) console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}`)

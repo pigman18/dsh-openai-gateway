@@ -90,7 +90,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` | Chat completions, streaming or not |
 | `POST` | `/v1/completions` | Same handler, for clients that insist on the legacy path |
 | `OPTIONS` | `/v1/*` | CORS preflight, answered without a key |
-| `GET` | `/plugins/dsh-openai-gateway/status` | Status document the page reads; carries the whole catalog (rebuilt once the 60 s cache expires; `?refresh=1` forces a rebuild) |
+| `GET` | `/plugins/dsh-openai-gateway/status` | Status document the page reads; carries the whole catalog (rebuilt once the 60 s cache expires; `?refresh=1` forces a rebuild) plus `recent`: the last 20 requests with duration, first-byte time, attempts and outcome |
 | `POST` | `/plugins/dsh-openai-gateway/settings` | `{"port": 8787}` — rebind, `409` if that port is taken |
 | `POST` | `/plugins/dsh-openai-gateway/key` | `{"action":"regenerate"}` — mint a new key |
 

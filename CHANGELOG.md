@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.4 (2026-10-23)
+
+### Added
+
+- **状态文档里的「最近请求」诊断**（`GET /plugins/dsh-openai-gateway/status` 的 `recent`，最新在前，保留 20 条）。每条记录 `at` / `model` / `stream` / `ms` / `firstByteMs` / `attempts` / `outcome`（`ok`｜`error`｜`aborted`）/ `code` / `message`。
+  - **为什么需要它**：`requests` 与 `failures` 两个计数器只能回答「有没有失败」，不能回答「刚才那一次到底怎么了」——客户端挂断和上游限流都会让同一个数字 +1。没有这条记录时，排查「外部调用又断了」只能靠猜：池子文件只能说明上游有没有拒绝，计数器只能说明有一次失败，两者对不上就无从下手。
+  - 每条请求结束时还会写一行日志（成功走 info，失败走 warn，带 adapter 自己的 code 与原文）。
+- 新增回归检查：`tests/resilience.spec.mjs` 第 6 条断言状态文档确实记录了最近请求的模型、是否流式、耗时、首字节时间与结束原因。**6/6**（`1.0.3` 上没有 `recent` 字段，这条会失败）。
+
 ## 1.0.3 (2026-10-23)
 
 ### Fixes

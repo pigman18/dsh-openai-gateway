@@ -90,7 +90,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 | `POST` | `/v1/chat/completions` | 对话补全，流式或非流式 |
 | `POST` | `/v1/completions` | 同一处理器，兼容只认旧路径的客户端 |
 | `OPTIONS` | `/v1/*` | CORS 预检，无需鉴权 |
-| `GET` | `/plugins/dsh-openai-gateway/status` | 页面读取的状态文档，附带完整模型清单（超过 60 秒缓存会先重建；`?refresh=1` 强制重建） |
+| `GET` | `/plugins/dsh-openai-gateway/status` | 页面读取的状态文档，附带完整模型清单（超过 60 秒缓存会先重建；`?refresh=1` 强制重建）与 `recent`：最近 20 次请求的耗时、首字节、尝试次数与结束原因 |
 | `POST` | `/plugins/dsh-openai-gateway/settings` | `{"port": 8787}` 改端口，端口被占返回 409 |
 | `POST` | `/plugins/dsh-openai-gateway/key` | `{"action":"regenerate"}` 换密钥 |
 

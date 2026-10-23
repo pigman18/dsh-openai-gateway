@@ -57,6 +57,8 @@ const RETRYABLE_CODES = new Set(['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIME
 const SILENT_FLUSH_MS = 10_000
 /** Interval between SSE comments once the stream is committed and quiet. */
 const KEEPALIVE_MS = 15_000
+/** How many finished requests the status document keeps for diagnosis. */
+const RECENT_LIMIT = 20
 const KEY_PREFIX = 'sk-dsh-'
 /** Service keys for the HTTP surface, newest name first. */
 const WEB_SERVER_KEYS = ['webServer', 'httpServer']
@@ -132,6 +134,7 @@ export function apply(ctx, config) {
     keepAlive,
     requests: 0,
     failures: 0,
+    recent: [],
     server: undefined,
     listenPort: undefined,
     portFallback: false,
@@ -360,8 +363,28 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
   const controller = new AbortController()
   res.on('close', () => controller.abort())
 
-  if (call.wantsStream) await streamCompletion(ctx, state, res, call, controller.signal)
-  else await blockingCompletion(ctx, state, res, call, controller.signal)
+  // One record per request, so "why did the last call drop?" is a question the
+  // status document can answer instead of a guess. Counters cannot: a client
+  // that hangs up and an upstream that throttles both bump one number.
+  const trace = {
+    at: Date.now(),
+    model: requested,
+    stream: call.wantsStream === true,
+    attempts: 1,
+    outcome: 'ok',
+  }
+  call.trace = trace
+  try {
+    if (call.wantsStream) await streamCompletion(ctx, state, res, call, controller.signal)
+    else await blockingCompletion(ctx, state, res, call, controller.signal)
+  } catch (error) {
+    trace.outcome = 'error'
+    trace.code = error?.code
+    trace.message = messageOf(error)
+    throw error
+  } finally {
+    recordRequest(ctx, state, trace)
+  }
 }
 
 /* --------------------------------------------------------- translation */
@@ -683,6 +706,24 @@ function resolveRetryPolicy(settings) {
   return { maxRetries, initialDelayMs, maxDelayMs, jitterRatio: RETRY_JITTER }
 }
 
+/**
+ * Keep one finished request, and put it where an operator will look.
+ *
+ * The counters (`requests`, `failures`) answer "did anything fail" but not
+ * "what happened to the last call". The five fields here do: which model, how
+ * many attempts it took, when the first byte left, how it ended and — when it
+ * ended badly — the adapter's own code and message.
+ */
+function recordRequest(ctx, state, trace) {
+  trace.ms = Date.now() - trace.at
+  state.recent.unshift(trace)
+  if (state.recent.length > RECENT_LIMIT) state.recent.length = RECENT_LIMIT
+  const where = `${trace.model} ${trace.stream ? 'stream' : 'blocking'} ${trace.ms}ms`
+  const why = trace.code === undefined ? '' : ` ${trace.code}: ${String(trace.message ?? '').slice(0, 200)}`
+  if (trace.outcome === 'ok') logInfo(ctx, `request ${where}${why}`)
+  else logWarn(ctx, `request ${where} ended ${trace.outcome}${why}`)
+}
+
 /** Whether a failure is one the host would retry. */
 function retryable(failure) {
   return failure !== undefined && typeof failure.code === 'string' && RETRYABLE_CODES.has(failure.code)
@@ -809,8 +850,10 @@ async function blockingCompletion(ctx, state, res, call, signal) {
 
   // Nothing has been written to the client yet, so a transient failure can be
   // retried exactly the way the host's agent loop would retry it.
+  const trace = call.trace ?? {}
   let result
   for (let attempt = 0; ; attempt += 1) {
+    trace.attempts = attempt + 1
     try {
       result = await runOnce(false)
       if (stopRefused(result.finish, call.stopRequested)) result = await runOnce(true)
@@ -820,6 +863,9 @@ async function blockingCompletion(ctx, state, res, call, signal) {
         : undefined
       if (delay === undefined || !await sleep(delay, signal)) {
         state.failures += 1
+        trace.outcome = signal.aborted ? 'aborted' : 'error'
+        trace.code = error?.code
+        trace.message = messageOf(error)
         sendFailure(res, error)
         return
       }
@@ -836,9 +882,13 @@ async function blockingCompletion(ctx, state, res, call, signal) {
 
   if (result.finish?.kind === 'error' || result.finish?.kind === 'aborted') {
     state.failures += 1
+    trace.outcome = result.finish.kind === 'aborted' ? 'aborted' : 'error'
+    trace.code = result.finish.failure?.code
+    trace.message = messageOf(result.finish.failure)
     sendFailure(res, result.finish.failure)
     return
   }
+  trace.firstByteMs = Date.now() - trace.at
 
   const toolCalls = [...result.tools.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -881,6 +931,7 @@ async function blockingCompletion(ctx, state, res, call, signal) {
 async function streamCompletion(ctx, state, res, call, signal) {
   const id = `chatcmpl-${randomUUID()}`
   const created = Math.floor(Date.now() / 1000)
+  const trace = call.trace ?? {}
   let open = false
   let usage
   let finish
@@ -905,6 +956,7 @@ async function streamCompletion(ctx, state, res, call, signal) {
   const flush = () => {
     if (open) return
     open = true
+    trace.firstByteMs = Date.now() - trace.at
     keepAlive?.woke()
     res.writeHead(200, {
       ...corsHeaders(),
@@ -975,6 +1027,7 @@ async function streamCompletion(ctx, state, res, call, signal) {
   // caller would see the answer twice, so a failure after that point is
   // reported rather than replayed.
   for (let attempt = 0; ; attempt += 1) {
+    trace.attempts = attempt + 1
     try {
       await runOnce(false)
       if (!open && stopRefused(finish, call.stopRequested)) await runOnce(true)
@@ -985,6 +1038,9 @@ async function streamCompletion(ctx, state, res, call, signal) {
       if (delay === undefined || !await sleep(delay, signal)) {
         keepAlive.stop()
         state.failures += 1
+        trace.outcome = signal.aborted ? 'aborted' : 'error'
+        trace.code = error?.code
+        trace.message = messageOf(error)
         if (!open) {
           sendFailure(res, error)
           return
@@ -1014,6 +1070,9 @@ async function streamCompletion(ctx, state, res, call, signal) {
 
   if (!open && (finish?.kind === 'error' || finish?.kind === 'aborted')) {
     state.failures += 1
+    trace.outcome = finish.kind === 'aborted' ? 'aborted' : 'error'
+    trace.code = finish.failure?.code
+    trace.message = messageOf(finish.failure)
     sendFailure(res, finish.failure)
     return
   }
@@ -1024,6 +1083,9 @@ async function streamCompletion(ctx, state, res, call, signal) {
   if (finish?.kind === 'error' || finish?.kind === 'aborted') {
     state.failures += 1
     const failure = finish.failure
+    trace.outcome = finish.kind === 'aborted' ? 'aborted' : 'error'
+    trace.code = failure?.code
+    trace.message = messageOf(failure)
     res.write(
       `data: ${JSON.stringify({
         error: {
@@ -1391,6 +1453,10 @@ async function statusPayload(ctx, state, ttl, refresh) {
     })),
     requests: state.requests,
     failures: state.failures,
+    // Newest first. This is what turns "it dropped again" into a cause: the
+    // model, how many attempts it took, how long the first byte took, and the
+    // adapter's own code when it ended badly.
+    recent: state.recent.map((entry) => ({ ...entry })),
     startedAt: state.startedAt,
     catalogAt: state.catalog.at,
   }
