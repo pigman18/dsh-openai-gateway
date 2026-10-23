@@ -220,8 +220,13 @@ await check('the status document records what each request did', async () => {
   assert.equal(last.code, 'RATE_LIMIT')
   assert.ok(typeof last.ms === 'number' && last.ms >= 0, 'no duration recorded')
   assert.ok(typeof last.firstByteMs === 'number', 'no first-byte time recorded')
+
   const good = await readStatus(ok.webRoutes)
-  assert.equal(good.recent[0].outcome, 'ok', 'a successful request was not recorded as ok')
+  const done = good.recent[0]
+  assert.equal(done.outcome, 'ok', 'a successful request was not recorded as ok')
+  assert.ok(typeof done.textBytes === 'number' && done.textBytes > 0, `no text bytes recorded: ${JSON.stringify(done)}`)
+  assert.ok(typeof done.reasoningBytes === 'number', 'no reasoning byte count recorded')
+  assert.equal(done.finish, 'stop', `expected the finish kind to be recorded, got ${done.finish}`)
 })
 
 for (const [ok, name] of results) console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}`)

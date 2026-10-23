@@ -372,6 +372,8 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
     stream: call.wantsStream === true,
     attempts: 1,
     outcome: 'ok',
+    textBytes: 0,
+    reasoningBytes: 0,
   }
   call.trace = trace
   try {
@@ -889,6 +891,9 @@ async function blockingCompletion(ctx, state, res, call, signal) {
     return
   }
   trace.firstByteMs = Date.now() - trace.at
+  trace.textBytes = result.text.length
+  trace.reasoningBytes = result.reasoning.length
+  trace.finish = result.finish?.kind ?? 'unknown'
 
   const toolCalls = [...result.tools.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -938,6 +943,8 @@ async function streamCompletion(ctx, state, res, call, signal) {
 
   const write = (delta, finishReason) => {
     if (res.writableEnded) return
+    if (typeof delta.content === 'string') trace.textBytes = (trace.textBytes ?? 0) + delta.content.length
+    if (typeof delta.reasoning_content === 'string') trace.reasoningBytes = (trace.reasoningBytes ?? 0) + delta.reasoning_content.length
     res.write(
       `data: ${JSON.stringify({
         id,
@@ -1101,6 +1108,7 @@ async function streamCompletion(ctx, state, res, call, signal) {
   }
 
   flush()
+  trace.finish = finish?.kind ?? 'unknown'
   write({}, openAiFinish(finish))
   if (call.includeUsage) {
     res.write(

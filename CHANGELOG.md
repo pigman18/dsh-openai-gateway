@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.5 (2026-10-23)
+
+### Added
+
+- **`recent` 里补上「到底有没有正文」**：新增 `textBytes`（已下发的正文长度）、`reasoningBytes`（已下发的推理长度）、`finish`（`stop` / `max-tokens` / `tool-calls` / `aborted` / `error`）。
+  - **为什么**：`outcome: "ok"` 只说明流是按协议收尾的，不说明客户端真的收到了回复。一个「推理写完了、正文一个字没发、`finish_reason: stop`」的响应在旧记录里和一次正常回答长得一模一样 —— 而客户端看到的正是「思考结束 → 没有回复 → 像断了」。现在 `textBytes: 0` 与 `finish: "stop"` 并列出现，就能一眼把「上游只给了推理」和「客户端自己断的」区分开。
+- 回归检查补三条断言：成功请求必须记录非零 `textBytes`、`reasoningBytes` 为数字、`finish` 为 `stop`。**6/6**。
+
 ## 1.0.4 (2026-10-23)
 
 ### Added
