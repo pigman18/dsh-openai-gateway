@@ -100,6 +100,11 @@ export const inject = ['llm']
  *   silentFlushMs, keepAliveMs
  *                  — how long a quiet stream may stay silent before the
  *                    response commits and pings (defaults 10 s / 15 s)
+ *   maxInputTokens — refuse a request whose estimated input exceeds this
+ *                    (default 0 = off; otherwise the model's context window
+ *                    is used when the provider publishes one)
+ *   maxMessages    — drop the oldest turns beyond this many, always keeping
+ *                    the history starting at a `user` message (default 0 = off)
  */
 export function apply(ctx, config) {
   const settings = config ?? {}
@@ -114,6 +119,12 @@ export function apply(ctx, config) {
   const keepAlive = {
     silentFlushMs: positiveOr(settings.silentFlushMs, SILENT_FLUSH_MS),
     keepAliveMs: positiveOr(settings.keepAliveMs, KEEPALIVE_MS),
+  }
+  // `0` / absent means off, so a profile that never sets these keeps the old
+  // behaviour of forwarding whatever the caller sent.
+  const inputGuard = {
+    maxInputTokens: nonNegativeInteger(settings.maxInputTokens),
+    maxMessages: nonNegativeInteger(settings.maxMessages),
   }
 
   // Persisted state lives in one plugin-owned file under the Harness home:
@@ -132,6 +143,7 @@ export function apply(ctx, config) {
     catalog: { at: 0, entries: [] },
     retry,
     keepAlive,
+    inputGuard,
     requests: 0,
     failures: 0,
     recent: [],
@@ -345,49 +357,67 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
     return
   }
 
-  let call
-  try {
-    const route = await resolveRoute(ctx, state, ttl, requested)
-    if (route === undefined) {
-      sendError(res, 404, 'invalid_request_error', `model ${requested} is not registered`, {
-        code: 'model_not_found',
-      })
-      return
-    }
-    call = translate(body, route, requested)
-  } catch (error) {
-    sendError(res, 400, 'invalid_request_error', messageOf(error))
-    return
-  }
-
-  const controller = new AbortController()
-  res.on('close', () => controller.abort())
-
-  // One record per request, so "why did the last call drop?" is a question the
-  // status document can answer instead of a guess. Counters cannot: a client
-  // that hangs up and an upstream that throttles both bump one number.
+  // One record per request, from here on: a refused request is still a request,
+  // and "it dropped again" is answered by the record, not by the counter.
   const trace = {
     at: Date.now(),
     model: requested,
-    stream: call.wantsStream === true,
+    stream: body.stream === true || body.stream === 'true',
     attempts: 1,
     outcome: 'ok',
     textBytes: 0,
     reasoningBytes: 0,
   }
+
+  try {
+    let call
+    try {
+      const route = await resolveRoute(ctx, state, ttl, requested)
+      if (route === undefined) {
+        trace.outcome = 'rejected'
+        trace.code = 'model_not_found'
+        sendError(res, 404, 'invalid_request_error', `model ${requested} is not registered`, {
+          code: 'model_not_found',
+        })
+        return
+      }
+      call = translate(body, route, requested)
+      call.trace = trace
+      const refusal = await applyInputGuard(ctx, state, ttl, route, call, trace)
+      if (refusal !== undefined) {
+        state.failures += 1
+        trace.outcome = 'error'
+        trace.code = refusal.code
+        trace.message = refusal.message
+        sendFailure(res, refusal)
+        return
+      }
+    } catch (error) {
+      trace.outcome = 'error'
+      trace.code = error?.code ?? 'INVALID_REQUEST'
+      trace.message = messageOf(error)
+      sendError(res, 400, 'invalid_request_error', messageOf(error))
+      return
+    }
+
+    const controller = new AbortController()
+    res.on('close', () => controller.abort())
+
   // The request shape, not just its outcome: an empty reply is usually the
   // client's own budget at work (a small max_tokens is spent on reasoning
   // before any text), and that is invisible from the response alone.
+  trace.stream = call.wantsStream === true
   trace.maxTokens = call.config.maxTokens
   trace.effort = call.effort
   trace.tools = (call.io.tools ?? []).length
   trace.systemChars = (call.io.system ?? '').length
   trace.messages = call.io.messages.length
   trace.roles = call.io.messages.map((message) => message.role).join(',')
+  trace.inputTokensEst = estimateInputTokens(call)
   call.trace = trace
-  try {
-    if (call.wantsStream) await streamCompletion(ctx, state, res, call, controller.signal)
-    else await blockingCompletion(ctx, state, res, call, controller.signal)
+
+  if (call.wantsStream) await streamCompletion(ctx, state, res, call, controller.signal)
+  else await blockingCompletion(ctx, state, res, call, controller.signal)
   } catch (error) {
     trace.outcome = 'error'
     trace.code = error?.code
@@ -703,6 +733,10 @@ const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max']
 
 /* ----------------------------------------------------------------- retry */
 
+function nonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 0
+}
+
 function positiveOr(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
 }
@@ -716,6 +750,94 @@ function resolveRetryPolicy(settings) {
     : RETRY_MAX_RETRIES
   return { maxRetries, initialDelayMs, maxDelayMs, jitterRatio: RETRY_JITTER }
 }
+
+/**
+ * Rough input size in tokens, from the only unit every message shape shares.
+ *
+ * Deliberately approximate: characters are divided by three, which lands
+ * between Latin text (~4 chars/token) and CJK (~1.5). The number is recorded
+ * next to the upstream's own `usage.prompt_tokens`, so the estimate can be
+ * calibrated against reality instead of being trusted forever.
+ */
+function estimateInputTokens(call) {
+  let chars = call.io.system?.length ?? 0
+  for (const message of call.io.messages) {
+    for (const block of message.content ?? []) {
+      if (typeof block.text === 'string') chars += block.text.length
+      else if (typeof block.arguments === 'string') chars += block.arguments.length
+    }
+  }
+  for (const tool of call.io.tools ?? []) chars += JSON.stringify(tool).length
+  return Math.ceil(chars / 3) + call.io.messages.length * 4
+}
+
+/** The model's declared context window, when the provider publishes one. */
+async function contextWindowOf(ctx, state, ttl, route) {
+  try {
+    const entries = await catalog(ctx, state, ttl, false)
+    const hit = entries.find(
+      (entry) => entry.provider === route.provider && entry.model.id === route.model,
+    )
+    const window = hit?.model?.contextWindow
+    return typeof window === 'number' && window > 0 ? window : undefined
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Drop the oldest turns until the history fits `maxMessages`.
+ *
+ * The kept history always starts at a `user` message: starting at a `tool`
+ * result, or at an assistant turn whose tool calls were dropped, hands the
+ * adapter a conversation it cannot replay.
+ */
+function truncateHistory(call, maxMessages) {
+  const messages = call.io.messages
+  if (!Number.isInteger(maxMessages) || maxMessages <= 0 || messages.length <= maxMessages) return 0
+  let start = messages.length - maxMessages
+  while (start < messages.length && messages[start].role !== 'user') start += 1
+  if (start >= messages.length) return 0
+  call.io = { ...call.io, messages: messages.slice(start) }
+  return start
+}
+
+/**
+ * Refuse a request that is plainly larger than the model can take, and trim
+ * one that the profile asked to keep short.
+ *
+ * Why this exists: a stateless gateway is talked to by clients that run their
+ * own agent loop and resend their whole history every turn. Nothing here
+ * compacts, so the request grows until the upstream answers something useless
+ * (measured: reasoning only, `finish: stop`, zero content). Failing loudly at
+ * the boundary with the size and the limit is more useful than relaying that.
+ *
+ * Returns the failure to send, or `undefined` when the request may proceed.
+ */
+async function applyInputGuard(ctx, state, ttl, route, call, trace) {
+  const guard = state.inputGuard
+  const dropped = truncateHistory(call, guard.maxMessages)
+  if (dropped > 0) {
+    trace.truncatedMessages = dropped
+    logInfo(ctx, `truncated ${dropped} oldest messages to fit maxMessages=${guard.maxMessages}`)
+  }
+  const window = await contextWindowOf(ctx, state, ttl, route)
+  if (window !== undefined) trace.contextWindow = window
+  const limit = guard.maxInputTokens > 0 ? guard.maxInputTokens : window
+  if (limit === undefined) return undefined
+  const estimate = estimateInputTokens(call)
+  trace.inputTokensEst = estimate
+  if (estimate <= limit) return undefined
+  return {
+    code: 'CONTEXT_WINDOW_EXCEEDED',
+    message:
+      `this request is about ${estimate} input tokens but ${route.provider}/${route.model} `
+      + `accepts ${limit}. The gateway is stateless: it cannot compact the history a client `
+      + `resends, so the conversation has to be shortened on the calling side (or raise `
+      + `maxInputTokens / maxMessages in this plugin's config).`,
+  }
+}
+
 
 /**
  * Keep one finished request, and put it where an operator will look.
@@ -917,6 +1039,7 @@ async function blockingCompletion(ctx, state, res, call, signal) {
   trace.textBytes = result.text.length
   trace.reasoningBytes = result.reasoning.length
   trace.finish = result.finish?.kind ?? 'unknown'
+  if (result.usage !== undefined) trace.usage = result.usage
 
   const toolCalls = [...result.tools.entries()]
     .sort((a, b) => a[0] - b[0])
@@ -1159,6 +1282,9 @@ async function streamCompletion(ctx, state, res, call, signal) {
 
   flush()
   trace.finish = finish?.kind ?? 'unknown'
+  // The upstream's own count, next to the estimate: this is what calibrates
+  // `inputTokensEst` and what makes "how big was that request" answerable.
+  if (usage !== undefined) trace.usage = usage
   write({}, openAiFinish(finish))
   if (call.includeUsage) {
     res.write(

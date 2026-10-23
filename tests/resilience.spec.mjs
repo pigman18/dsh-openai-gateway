@@ -273,6 +273,46 @@ await check('the request shape is recorded', async () => {
   assert.equal(last.roles, 'user')
 })
 
+
+// ---- 10. a request over the limit is refused with a reason ----
+await check('an oversized request is refused as CONTEXT_WINDOW_EXCEEDED', async () => {
+  const app = mount({ ...fast, maxInputTokens: 200 }, [{ chunks: [{ type: 'text-delta', text: 'x' }] }])
+  const big = 'x'.repeat(4000)          // ~1333 tokens by the estimator, over the 200 limit
+  const res = await post(app.port, { ...body, messages: [{ role: 'user', content: big }] })
+  assert.equal(res.status, 413, `expected 413, got ${res.status}: ${res.text.slice(0, 160)}`)
+  const payload = JSON.parse(res.text)
+  assert.equal(payload.error.code, 'CONTEXT_WINDOW_EXCEEDED')
+  assert.ok(/input tokens/.test(payload.error.message), 'the refusal does not say how big it was')
+  const status = await readStatus(app.webRoutes)
+  assert.equal(status.recent[0].code, 'CONTEXT_WINDOW_EXCEEDED')
+  assert.ok(status.recent[0].inputTokensEst > 200, 'the estimate was not recorded')
+})
+
+// ---- 11. a request under the limit is untouched ----
+await check('a request under the limit is not refused', async () => {
+  const app = mount({ ...fast, maxInputTokens: 100_000 }, [{ chunks: [{ type: 'text-delta', text: 'ok' }] }])
+  const res = await post(app.port, body)
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${res.text.slice(0, 160)}`)
+  assert.ok(res.text.includes('ok'))
+})
+
+// ---- 12. maxMessages drops the oldest turns, keeping a user boundary ----
+await check('maxMessages trims history at a user boundary', async () => {
+  const app = mount({ ...fast, maxMessages: 3 }, [{ chunks: [{ type: 'text-delta', text: 'ok' }] }])
+  const history = [
+    { role: 'user', content: 'first' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'user', content: 'second' },
+    { role: 'assistant', content: 'a2' },
+    { role: 'user', content: 'third' },
+  ]
+  const res = await post(app.port, { ...body, messages: history })
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${res.text.slice(0, 160)}`)
+  const status = await readStatus(app.webRoutes)
+  assert.ok(status.recent[0].truncatedMessages >= 2, `expected history to be trimmed, got ${JSON.stringify(status.recent[0])}`)
+  assert.equal(status.recent[0].roles, 'user,assistant,user', `kept roles should start at a user turn: ${status.recent[0].roles}`)
+})
+
 for (const [ok, name] of results) console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}`)
 const failed = results.filter(([ok]) => !ok).length
 console.log(`\n${results.length - failed}/${results.length} checks passed`)

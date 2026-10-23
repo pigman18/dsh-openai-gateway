@@ -138,6 +138,8 @@ Optional keys on the bundle row:
 | `retryMaxDelayMs` | `10000` | Backoff ceiling; an upstream reset point beyond it is answered, not waited out |
 | `silentFlushMs` | `10000` | How long a streaming response may stay quiet before its headers commit and pings begin |
 | `keepAliveMs` | `15000` | Interval between `: keep-alive` SSE comments |
+| `maxInputTokens` | `0` (off) | Refuse with `413 CONTEXT_WINDOW_EXCEEDED` when the estimated input exceeds it; `0` falls back to the model's declared context window (no cap when the provider declares none) |
+| `maxMessages` | `0` (off) | Drop the oldest turns beyond this many, always keeping the history starting at a `user` message |
 
 ## Known limits
 

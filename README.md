@@ -138,6 +138,8 @@ bundle 行上可选：
 | `retryMaxDelayMs` | `10000` | 退避上限；上游给出的重置点超过它就按「请稍后再来」直接失败 |
 | `silentFlushMs` | `10000` | 流式响应静默多久后提交响应头并开始保活 |
 | `keepAliveMs` | `15000` | 保活 `: keep-alive` 注释的间隔 |
+| `maxInputTokens` | `0`（关） | 估算输入超过它就回 `413 CONTEXT_WINDOW_EXCEEDED`；`0` 时改用模型声明的 contextWindow（provider 没声明就不拦） |
+| `maxMessages` | `0`（关） | 历史超过这么多条就丢弃最早的若干条，且保证保留部分从 `user` 开始 |
 
 ## 已知边界
 

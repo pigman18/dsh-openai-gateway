@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.7 (2026-10-23)
+
+### Added
+
+- **输入体积护栏**：`maxInputTokens`（`0` = 用模型声明的 contextWindow；provider 没声明就不拦）与 `maxMessages`（历史超限时丢弃最早的若干条，**保证保留部分从 `user` 开始** —— 从 `tool` 结果或「工具调用被丢掉」的 assistant 轮开始，adapter 无法重放）。超限时回 `413 CONTEXT_WINDOW_EXCEEDED`，并在消息里写出「估算 N tokens，上限 M」。
+  - **为什么需要**：网关是无状态转发，而客户端（实测：WorkBuddy 桌面端）每轮把整段历史重发一遍 —— 记录里 `systemChars=49596`、`tools=23`、`messages` 从 312 涨到 317。网关不压缩，请求一轮比一轮大，直到上游给出「只有推理、`finish=stop`、正文为空」这种无用响应。在边界上明确失败并报出体积，比把一个空回复转发给调用方有用。
+- **`recent` 记录上游真实用量与估算**：`usage`（上游的 `prompt_tokens`/`completion_tokens`/`total_tokens`）、`inputTokensEst`（本地估算）、`contextWindow`（模型声明值）、`truncatedMessages`（被丢弃的条数）。估算值靠 `usage.prompt_tokens` 校准，而不是长期靠猜。
+- 回归检查扩到 **12/12**：新增「超限请求回 413 且带体积」「未超限不受影响」「`maxMessages` 在 user 边界截断」。
+
 ## 1.0.6 (2026-10-23)
 
 ### Fixes
