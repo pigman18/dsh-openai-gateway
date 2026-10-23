@@ -375,6 +375,15 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
     textBytes: 0,
     reasoningBytes: 0,
   }
+  // The request shape, not just its outcome: an empty reply is usually the
+  // client's own budget at work (a small max_tokens is spent on reasoning
+  // before any text), and that is invisible from the response alone.
+  trace.maxTokens = call.config.maxTokens
+  trace.effort = call.effort
+  trace.tools = (call.io.tools ?? []).length
+  trace.systemChars = (call.io.system ?? '').length
+  trace.messages = call.io.messages.length
+  trace.roles = call.io.messages.map((message) => message.role).join(',')
   call.trace = trace
   try {
     if (call.wantsStream) await streamCompletion(ctx, state, res, call, controller.signal)
@@ -875,11 +884,25 @@ async function blockingCompletion(ctx, state, res, call, signal) {
       continue
     }
     const failure = result.finish?.kind === 'error' ? result.finish.failure : undefined
+    // Same rule as the streaming path: no text and no tool call is not an
+    // answer, it is EMPTY_RESPONSE — retryable, and never a silent success.
+    const empty = result.finish?.kind === 'stop' && result.text.length === 0 && result.tools.size === 0
+    const retryableFailure = empty === true ? { code: 'EMPTY_RESPONSE', message: 'the model finished without producing any content' } : failure
     const delay = attempt < state.retry.maxRetries && !signal.aborted
-      ? retryDelayMs(state.retry, attempt + 1, failure)
+      ? retryDelayMs(state.retry, attempt + 1, retryableFailure)
       : undefined
     if (delay === undefined || !await sleep(delay, signal)) break
-    logInfo(ctx, `retrying after ${messageOf(failure)} in ${delay}ms (${attempt + 1}/${RETRY_MAX_RETRIES})`)
+    logInfo(ctx, `retrying after ${messageOf(retryableFailure)} in ${delay}ms (${attempt + 1}/${state.retry.maxRetries})`)
+  }
+
+  if (result.finish?.kind === 'stop' && result.text.length === 0 && result.tools.size === 0) {
+    const failure = { code: 'EMPTY_RESPONSE', message: 'the model finished without producing any content' }
+    state.failures += 1
+    trace.outcome = 'error'
+    trace.code = failure.code
+    trace.message = failure.message
+    sendFailure(res, failure)
+    return
   }
 
   if (result.finish?.kind === 'error' || result.finish?.kind === 'aborted') {
@@ -945,6 +968,7 @@ async function streamCompletion(ctx, state, res, call, signal) {
     if (res.writableEnded) return
     if (typeof delta.content === 'string') trace.textBytes = (trace.textBytes ?? 0) + delta.content.length
     if (typeof delta.reasoning_content === 'string') trace.reasoningBytes = (trace.reasoningBytes ?? 0) + delta.reasoning_content.length
+    if (Array.isArray(delta.tool_calls)) trace.toolCalls = (trace.toolCalls ?? 0) + delta.tool_calls.length
     res.write(
       `data: ${JSON.stringify({
         id,
@@ -1066,11 +1090,16 @@ async function streamCompletion(ctx, state, res, call, signal) {
       continue
     }
     const failure = finish?.kind === 'error' ? finish.failure : undefined
+    // A stop that produced neither text nor a tool call is not an answer. The
+    // host classifies exactly this as EMPTY_RESPONSE and retries it; handing
+    // the caller an empty success is what a UI reports as "it dropped".
+    const empty = finish?.kind === 'stop' && trace.textBytes === 0 && (trace.toolCalls ?? 0) === 0
+    const retryableFailure = empty === true ? { code: 'EMPTY_RESPONSE', message: 'the model finished without producing any content' } : failure
     const delay = !open && attempt < state.retry.maxRetries && !signal.aborted
-      ? retryDelayMs(state.retry, attempt + 1, failure)
+      ? retryDelayMs(state.retry, attempt + 1, retryableFailure)
       : undefined
     if (delay === undefined || !await sleep(delay, signal)) break
-    logInfo(ctx, `retrying stream after ${messageOf(failure)} in ${delay}ms (${attempt + 1}/${RETRY_MAX_RETRIES})`)
+    logInfo(ctx, `retrying stream after ${messageOf(retryableFailure)} in ${delay}ms (${attempt + 1}/${state.retry.maxRetries})`)
   }
 
   keepAlive.stop()
@@ -1081,6 +1110,27 @@ async function streamCompletion(ctx, state, res, call, signal) {
     trace.code = finish.failure?.code
     trace.message = messageOf(finish.failure)
     sendFailure(res, finish.failure)
+    return
+  }
+
+  // Exhausted the retries and the model still answered nothing: say so. An
+  // empty success is indistinguishable from a dropped connection on the
+  // client's side, which is the report this whole path exists to stop.
+  if (finish?.kind === 'stop' && trace.textBytes === 0 && (trace.toolCalls ?? 0) === 0) {
+    const failure = { code: 'EMPTY_RESPONSE', message: 'the model finished without producing any content' }
+    state.failures += 1
+    trace.outcome = 'error'
+    trace.code = failure.code
+    trace.message = failure.message
+    if (!open) {
+      sendFailure(res, failure)
+      return
+    }
+    res.write(
+      `data: ${JSON.stringify({ error: { message: failure.message, type: 'server_error', code: failure.code } })}\n\n`,
+    )
+    res.write('data: [DONE]\n\n')
+    res.end()
     return
   }
 

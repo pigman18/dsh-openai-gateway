@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.6 (2026-10-23)
+
+### Fixes
+
+- **「推理写完了、正文一个字没有」被当成成功返回**。实测记录（`recent`）：`finish=stop, textBytes=0, reasoningBytes=5610, outcome=ok` —— 上游在推理结束后直接收尾，网关如实转发了一个**空成功**。客户端（WorkBuddy）看到的就是「深度思考结束 → 没有回复 → 像断开」。
+  - **按宿主语义改成 `EMPTY_RESPONSE`**：`@deepseek-ai/dsh-llm-pi-ai` 把「`stop` 且无 content block」映射成 `EMPTY_RESPONSE`，而这个 code 本来就在默认可重试集合里。网关现在做同样的事：**还没写出任何字节时**重试；已经写出（例如推理已经流给客户端）时，以流内 `data: {"error":{…,"code":"EMPTY_RESPONSE"}}` + `data: [DONE]` 收尾，让客户端显示「上游没有返回正文」而不是「连接断了」。
+  - **不再可能返回空成功**：`finish=stop` 且 `textBytes=0` 且没有 tool call，一律按失败记账（`failures` 也会 +1）。
+- **`recent` 里补上请求形状**：`maxTokens` / `effort` / `tools` / `systemChars` / `messages` / `roles`。空回复最常见的成因是客户端给的预算被推理吃掉（`maxTokens` 偏小），而这一点只从响应侧看不出来；把请求形状和结果并排记录，才能一眼判断是「客户端预算」还是「上游行为」。
+- 回归检查扩到 **9/9**：新增「无正文的 stop 变成显式 EMPTY_RESPONSE」「无输出的空 stop 会被重试」「请求形状被记录」。
+
 ## 1.0.5 (2026-10-23)
 
 ### Added

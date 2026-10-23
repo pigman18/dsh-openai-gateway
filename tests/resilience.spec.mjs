@@ -229,6 +229,50 @@ await check('the status document records what each request did', async () => {
   assert.equal(done.finish, 'stop', `expected the finish kind to be recorded, got ${done.finish}`)
 })
 
+
+// ---- 7. reasoning without any reply is not a success ----
+await check('a reply-less stop becomes an explicit EMPTY_RESPONSE', async () => {
+  const attempts = [{
+    chunks: [{ type: 'reasoning-delta', text: 'thinking hard…' }],
+  }]
+  const app = mount({ ...fast, retryMaxRetries: 5 }, attempts)
+  const res = await post(app.port, body)
+  const text = res.text
+  assert.ok(text.includes('"EMPTY_RESPONSE"'), `the empty reply was not reported: ${text.slice(0, 240)}`)
+  assert.ok(text.endsWith('[DONE]\n\n'), 'the stream did not end with [DONE]')
+  const status = await readStatus(app.webRoutes)
+  assert.equal(status.recent[0].outcome, 'error')
+  assert.equal(status.recent[0].code, 'EMPTY_RESPONSE')
+  assert.equal(status.recent[0].textBytes, 0)
+  assert.ok(status.recent[0].reasoningBytes > 0, 'the reasoning that was sent should be recorded')
+})
+
+// ---- 8. an empty stop is retried while nothing has been written ----
+await check('a reply-less stop with no output is retried', async () => {
+  const attempts = [
+    {},                                   // stop with nothing at all
+    { chunks: [{ type: 'text-delta', text: 'answer' }] },
+  ]
+  const app = mount({ ...fast, retryMaxRetries: 5 }, attempts)
+  const res = await post(app.port, body)
+  assert.ok(res.text.includes('answer'), `the retry never produced the answer: ${res.text.slice(0, 200)}`)
+  const status = await readStatus(app.webRoutes)
+  assert.ok(status.recent[0].attempts >= 2, `expected at least two attempts, got ${status.recent[0].attempts}`)
+  assert.equal(status.recent[0].outcome, 'ok')
+})
+
+// ---- 9. the request shape is recorded, not just its outcome ----
+await check('the request shape is recorded', async () => {
+  const app = mount({ ...fast }, [{ chunks: [{ type: 'text-delta', text: 'x' }] }])
+  await post(app.port, { ...body, max_tokens: 4096, reasoning_effort: 'high' })
+  const status = await readStatus(app.webRoutes)
+  const last = status.recent[0]
+  assert.equal(last.maxTokens, 4096, `maxTokens not recorded: ${JSON.stringify(last)}`)
+  assert.equal(last.effort, 'high')
+  assert.equal(last.tools, 0)
+  assert.equal(last.roles, 'user')
+})
+
 for (const [ok, name] of results) console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}`)
 const failed = results.filter(([ok]) => !ok).length
 console.log(`\n${results.length - failed}/${results.length} checks passed`)
