@@ -57,7 +57,10 @@ let nextPort = 18990
 function mount(config, attempts) {
   const port = nextPort++
   const webRoutes = new Map()
-  let stream = scripted(attempts)
+  let captured = null
+  const script = scripted(attempts)
+  // The io (messages/tools/system) reaches the adapter as the stream options.
+  const stream = async function* (options) { captured = { io: options }; yield* script() }
   const ctx = {
     llm: {
       listProviders: () => [{ id: 'fake', name: 'fake' }],
@@ -72,7 +75,7 @@ function mount(config, attempts) {
     logger: { warn: () => {}, error: () => {}, info: () => {} },
   }
   apply(ctx, { enabled: true, port, apiKey: KEY, ...config })
-  return { port, webRoutes }
+  return { port, webRoutes, captured: () => captured }
 }
 
 const KEY = 'sk-dsh-spec-0123456789'
@@ -311,6 +314,28 @@ await check('maxMessages trims history at a user boundary', async () => {
   const status = await readStatus(app.webRoutes)
   assert.ok(status.recent[0].truncatedMessages >= 2, `expected history to be trimmed, got ${JSON.stringify(status.recent[0])}`)
   assert.equal(status.recent[0].roles, 'user,assistant,user', `kept roles should start at a user turn: ${status.recent[0].roles}`)
+})
+
+
+// ---- 13. tool calls without ids are paired with their results ----
+await check('an assistant tool call without an id is paired to its result', async () => {
+  const app = mount({ ...fast }, [{ chunks: [{ type: 'text-delta', text: 'done' }] }])
+  const res = await post(app.port, {
+    model: 'fake/m1',
+    stream: true,
+    tools: [{ type: 'function', function: { name: 'add', parameters: { type: 'object', properties: {} } } }],
+    messages: [
+      { role: 'user', content: 'add 2+3' },
+      { role: 'assistant', content: null, tool_calls: [{ type: 'function', function: { name: 'add', arguments: '{"a":2,"b":3}' } }] },
+      { role: 'tool', tool_call_id: 'call_from_client', content: '5' },
+    ],
+  })
+  assert.equal(res.status, 200, `expected 200, got ${res.status}: ${res.text.slice(0, 160)}`)
+  const seen = app.captured()
+  assert.ok(seen !== null, 'the adapter never saw the request')
+  const assistant = seen.io.messages.find((message) => message.role === 'assistant')
+  const call = assistant.content.find((block) => block.type === 'tool-call')
+  assert.equal(call.id, 'call_from_client', `tool call id was not aligned to the result: ${call.id}`)
 })
 
 for (const [ok, name] of results) console.log(`${ok ? 'ok  ' : 'FAIL'}  ${name}`)

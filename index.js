@@ -430,12 +430,43 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
 
 /* --------------------------------------------------------- translation */
 
+/**
+ * Pair assistant tool calls with the tool results that answer them.
+ *
+ * OpenAI pairs the two by id. A client that omits the id on the assistant turn,
+ * or invents a different one on the tool turn, hands the adapter a call with no
+ * result — and the upstream answers that with an empty completion (measured:
+ * reasoning only, `finish: stop`, zero content, which a UI shows as a dropped
+ * connection). The tool result carries the id the rest of the conversation
+ * refers to, so it wins whenever a positional result exists.
+ *
+ * @returns a map from message index to the ids of the results that follow it.
+ */
+function alignToolCallIds(rawMessages) {
+  const byIndex = new Map()
+  for (let index = 0; index < rawMessages.length; index += 1) {
+    const raw = rawMessages[index]
+    if (raw?.role !== 'assistant' || !Array.isArray(raw.tool_calls) || raw.tool_calls.length === 0) continue
+    const resultIds = []
+    for (let next = index + 1; next < rawMessages.length; next += 1) {
+      const follower = rawMessages[next]
+      if (follower?.role !== 'tool') break
+      const id = typeof follower.tool_call_id === 'string' ? follower.tool_call_id.trim() : ''
+      resultIds.push(id.length > 0 ? id : undefined)
+    }
+    if (resultIds.length > 0) byIndex.set(index, resultIds)
+  }
+  return byIndex
+}
+
 /** Build the adapter-agnostic request: call config plus per-dispatch options. */
 function translate(body, route, requested) {
   const systems = []
   const messages = []
 
-  for (const raw of Array.isArray(body.messages) ? body.messages : []) {
+  const rawMessages = Array.isArray(body.messages) ? body.messages : []
+  const resultIdsByIndex = alignToolCallIds(rawMessages)
+  for (const [rawIndex, raw] of rawMessages.entries()) {
     const role = typeof raw?.role === 'string' ? raw.role : ''
     if (role === 'system' || role === 'developer') {
       const text = textOf(raw.content)
@@ -450,13 +481,19 @@ function translate(body, route, requested) {
       const content = []
       const text = textOf(raw.content)
       if (text.length > 0) content.push({ type: 'text', text })
-      for (const entry of Array.isArray(raw.tool_calls) ? raw.tool_calls : []) {
+      const resultIds = resultIdsByIndex.get(rawIndex) ?? []
+      for (const [callIndex, entry] of (Array.isArray(raw.tool_calls) ? raw.tool_calls : []).entries()) {
         const fn = entry?.function ?? {}
         const args =
           typeof fn.arguments === 'string' ? fn.arguments : JSON.stringify(fn.arguments ?? {})
+        // The result's id wins: it is what the following tool message and the
+        // rest of the conversation refer to, so pairing by it is what makes
+        // the adapter see a call that actually has a result.
+        const ownId = typeof entry?.id === 'string' && entry.id.length > 0 ? entry.id : undefined
+        const alignedId = resultIds[callIndex]
         content.push({
           type: 'tool-call',
-          id: typeof entry?.id === 'string' && entry.id.length > 0 ? entry.id : `call_${randomUUID()}`,
+          id: alignedId ?? ownId ?? `call_${randomUUID()}`,
           name: typeof fn.name === 'string' && fn.name.length > 0 ? fn.name : 'unknown',
           arguments: args.length > 0 ? args : '{}',
         })

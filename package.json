@@ -1,6 +1,6 @@
 {
   "name": "dsh-openai-gateway",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "displayName": "DSH OpenAI Gateway",
   "description": "Exposes every model of every provider configured in DeepSeek Harness as an OpenAI-compatible endpoint on a fixed loopback port, with a sidebar page for the base URL, the API key, the port and every model id.",
   "author": "pigman18",

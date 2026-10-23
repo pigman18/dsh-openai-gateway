@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.8 (2026-10-23)
+
+### Fixes
+
+- **工具调用与工具结果配对失败 → 上游给出空回复**。OpenAI 用 `id` 把 assistant 的 `tool_calls` 和 `tool` 结果配对；客户端只要在 assistant 那侧漏了 `id`（或自己另造一个），网关原来会**生成一个随机 id**，于是这个调用在 adapter 眼里没有结果 —— 实测（真实上游 `workbuddy-global/deepseek-v4.1-flash`）：
+  - assistant `tool_calls` **带** `id`、`tool` 结果引用同一个 id → `text=10, finish=stop`（正常）；
+  - assistant `tool_calls` **缺** `id`、`tool` 结果引用 `call_1` → **`text=0`**，正是「深度思考结束、准备回复时断开」的那个症状。
+  - **修法**：`alignToolCallIds()` 先扫一遍消息，把每个 assistant 轮后面紧跟的 `tool` 结果的 `tool_call_id` 按位置收集起来，`translate()` 用**结果侧的 id 覆盖**调用侧缺失/不一致的 id。结果侧的 id 才是后续对话真正引用的那个，按它配对才能让 adapter 看到「有结果的调用」。
+- 回归检查扩到 **13/13**：新增「assistant 的 tool call 没有 id 时，被对齐到结果的 id」。
+
+### Notes
+
+- 顺带记录一条与本版无关但同源的事实：profile 里 `workbuddy-global/deepseek-v4.1-flash` 声明的 `contextWindow` 是 **1000000**（来自插件解析的上游目录），而实测该模型可用窗口远小于此。网关的 413 护栏按声明值判断，因此 177k token 的请求不会被拦 —— 要按真实上限拦截，请显式设 `maxInputTokens`（例如 `180000`）。
+
 ## 1.0.7 (2026-10-23)
 
 ### Added
