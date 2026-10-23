@@ -19,6 +19,7 @@
  * Only `node:` builtins are imported, so the package resolves from any
  * installation layout (linked checkout or packed tarball).
  */
+import { Buffer } from 'node:buffer'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
@@ -381,7 +382,7 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
         })
         return
       }
-      call = translate(body, route, requested)
+      call = await translate(ctx, body, route, requested)
       call.trace = trace
       const refusal = await applyInputGuard(ctx, state, ttl, route, call, trace)
       if (refusal !== undefined) {
@@ -460,7 +461,7 @@ function alignToolCallIds(rawMessages) {
 }
 
 /** Build the adapter-agnostic request: call config plus per-dispatch options. */
-function translate(body, route, requested) {
+async function translate(ctx, body, route, requested) {
   const systems = []
   const messages = []
 
@@ -474,7 +475,7 @@ function translate(body, route, requested) {
       continue
     }
     if (role === 'user') {
-      messages.push({ role: 'user', content: [{ type: 'text', text: textOf(raw.content) }] })
+      messages.push({ role: 'user', content: await userContent(ctx, raw.content) })
       continue
     }
     if (role === 'assistant') {
@@ -587,9 +588,10 @@ function requestedEffort(body) {
 }
 
 /**
- * OpenAI content is a string or a list of parts. Images are not forwarded:
- * an out-of-band caller cannot supply durable attachment references, so only
- * text survives, in order.
+ * Flatten content that only has a text form here (system prompts, assistant
+ * turns, tool results). User turns keep their non-text parts: see
+ * {@link userContent}, which admits images and files into the attachment store
+ * so adapters receive them as durable blocks.
  */
 function textOf(content) {
   if (typeof content === 'string') return content
@@ -622,6 +624,170 @@ function fieldDelta(previous, next) {
   if (next === previous) return ''
   if (next.startsWith(previous)) return next.slice(previous.length)
   return next
+}
+
+/* --------------------------------------------------------- attachment input */
+
+const MAX_REMOTE_BYTES = 25 * 1024 * 1024
+
+/** Decode canonical base64 into the bytes the attachment store commits. */
+function base64Bytes(data) {
+  return new Uint8Array(Buffer.from(data, 'base64'))
+}
+
+/**
+ * Split one OpenAI image part into a data URL payload, or fetch a remote one.
+ *
+ * The host stores attachments content-addressed (`sha256:…`) and every adapter
+ * reads them back through `ctx.attachments`, so the bytes have to be durable
+ * before the call is made — a URL that only the caller can reach would hand the
+ * provider nothing.
+ */
+async function imagePayload(part) {
+  const source = part?.image_url ?? part?.image ?? part?.url
+  const url = typeof source === 'string' ? source : source?.url
+  if (typeof url !== 'string' || url.length === 0) {
+    throw new Error('an image part needs "image_url.url"')
+  }
+  if (url.startsWith('data:')) {
+    const comma = url.indexOf(',')
+    if (comma < 0) throw new Error('malformed image data URL')
+    const header = url.slice(5, comma)
+    const data = url.slice(comma + 1)
+    const base64 = header.toLowerCase().includes(';base64')
+    return {
+      mediaType: header.split(';')[0].trim(),
+      data: base64 ? data.replace(/\s/g, '') : Buffer.from(decodeURIComponent(data), 'utf8').toString('base64'),
+    }
+  }
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error(`image url is not fetchable: ${url.slice(0, 40)}`)
+  }
+  const response = await fetch(url, { signal: AbortSignal.timeout(30000) })
+  if (!response.ok) throw new Error(`image fetch failed with HTTP ${response.status}`)
+  const declared = Number(response.headers.get('content-length') ?? '0')
+  if (declared > MAX_REMOTE_BYTES) throw new Error('remote image is too large to attach')
+  const bytes = Buffer.from(await response.arrayBuffer())
+  if (bytes.length > MAX_REMOTE_BYTES) throw new Error('remote image is too large to attach')
+  const mediaType = (response.headers.get('content-type') ?? '').split(';')[0].trim()
+  return { mediaType: mediaType.startsWith('image/') ? mediaType : 'image/png', data: bytes.toString('base64') }
+}
+
+/** Base64 payload of a `file` part, which OpenAI clients inline as a data URL. */
+function filePayload(part) {
+  const file = part?.file ?? part
+  const inline = file?.file_data ?? file?.data
+  if (typeof inline !== 'string' || inline.length === 0) {
+    throw new Error(
+      'a "file" part needs inline "file_data"; uploaded file ids live in the caller\'s account, not in this harness',
+    )
+  }
+  const comma = inline.indexOf(',')
+  const data = inline.startsWith('data:') && comma >= 0 ? inline.slice(comma + 1) : inline
+  const name = typeof file?.filename === 'string' && file.filename.length > 0 ? file.filename : undefined
+  const mediaType = inline.startsWith('data:') && comma >= 0 ? inline.slice(5, comma).split(';')[0].trim() : ''
+  return { data: data.replace(/\s/g, ''), ...(name === undefined ? {} : { name }), mediaType }
+}
+
+const TEXTUAL_MEDIA = /^(text\/|application\/(json|xml|x-yaml|yaml|javascript|typescript|x-sh|x-ndjson|sql)\b)/i
+const MAX_INLINE_TEXT_BYTES = 2 * 1024 * 1024
+
+/**
+ * Whether a file can simply be shown to the model as text.
+ *
+ * The host hands a stored file to a model as a read-only *path*, which is right
+ * for a harness session whose model has file tools — but an outside OpenAI
+ * client's model has none, so a path alone is a dead end. Text that decodes
+ * cleanly is far more useful inlined, which is what a chat caller expects.
+ */
+function inlineTextOf(bytes, mediaType) {
+  if (bytes.byteLength === 0 || bytes.byteLength > MAX_INLINE_TEXT_BYTES) return undefined
+  if (bytes.includes(0)) return undefined
+  if (mediaType.length > 0 && !TEXTUAL_MEDIA.test(mediaType)) return undefined
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Translate one user message into host content blocks.
+ *
+ * Text survives as text; images and files are committed to the attachment store
+ * first (images in one batch, so the store's per-message limits apply) and
+ * become durable `image` / `file` blocks, which is the only form adapters send.
+ * A text file is inlined instead: a caller's model has no file tools, so a
+ * stored path it cannot open would be worse than useless.
+ */
+async function userContent(ctx, content) {
+  if (typeof content === 'string' || content === null || content === undefined) {
+    return [{ type: 'text', text: textOf(content) }]
+  }
+  if (!Array.isArray(content)) return [{ type: 'text', text: textOf(content) }]
+
+  const attachments = ctx.get('attachments')
+  const slots = []
+  const images = []
+  const files = []
+  for (const part of content) {
+    if (typeof part === 'string') {
+      slots.push({ kind: 'text', text: part })
+      continue
+    }
+    if (part === null || typeof part !== 'object') continue
+    const type = typeof part.type === 'string' ? part.type : ''
+    if (type === 'image_url' || type === 'input_image' || (type === 'image' && !part.attachment)) {
+      slots.push({ kind: 'image', at: images.length })
+      images.push(await imagePayload(part))
+      continue
+    }
+    if (type === 'file' || type === 'input_file') {
+      const input = filePayload(part)
+      // Text that decodes cleanly is inlined: the model can read it directly,
+      // where a stored path would only be readable by a harness session's own
+      // file tools — which a caller's model does not have.
+      const text = inlineTextOf(base64Bytes(input.data), input.mediaType)
+      if (text !== undefined) {
+        slots.push({ kind: 'text', text: `[attached file: ${input.name ?? 'file'}]\n${text}` })
+        continue
+      }
+      slots.push({ kind: 'file', at: files.length })
+      files.push(input)
+      continue
+    }
+    if (typeof part.text === 'string') {
+      slots.push({ kind: 'text', text: part.text })
+      continue
+    }
+    throw new Error(`unsupported content part type "${type || 'unknown'}"`)
+  }
+
+  if ((images.length > 0 || files.length > 0) && attachments === undefined) {
+    throw new Error(
+      'this profile has no attachment store, so image and file inputs cannot be forwarded; send text only',
+    )
+  }
+
+  const imageRefs =
+    images.length === 0
+      ? []
+      : await attachments.saveImages(
+          images.map((image) => ({ data: base64Bytes(image.data), mediaType: image.mediaType })),
+        )
+  const fileRefs = []
+  for (const input of files) {
+    fileRefs.push(await attachments.saveFile({ data: base64Bytes(input.data), ...(input.name === undefined ? {} : { name: input.name }) }))
+  }
+
+  const blocks = []
+  for (const slot of slots) {
+    if (slot.kind === 'text') blocks.push({ type: 'text', text: slot.text })
+    else if (slot.kind === 'image') blocks.push({ type: 'image', attachment: imageRefs[slot.at] })
+    else blocks.push({ type: 'file', attachment: fileRefs[slot.at] })
+  }
+  if (blocks.length === 0) blocks.push({ type: 'text', text: '' })
+  return blocks
 }
 
 /* ------------------------------------------------------------- catalog */

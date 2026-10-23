@@ -28,7 +28,8 @@ A standalone [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-ha
 - **Fixed key** — `sk-dsh-…` is minted on first start and stored in `$DSH_HOME/openai-gateway/settings.json` (mode 0600), so it survives restarts; **Regenerate** on the page mints a new one (two-step confirm, the old key stops working at once). A legacy `api-key` file is migrated on first load, so an already-configured client keeps working.
 - **Sidebar page** — base URL, key (masked / reveal / copy), port (editable, Enter applies), and the whole catalog grouped by provider in collapsible groups: a copy button per model id, per provider, or for everything.
 - **Streaming and non-streaming** — `"stream": true` returns standard SSE (`data: …` frames, `[DONE]` last); otherwise a full `chat.completion`.
-- **Tool calls** — `tools` are forwarded, calls come back as `tool_calls` with reassembled `arguments` and `finish_reason: "tool_calls"`, and a `tool` message resolves by its `tool_call_id`.
+- **Tool calls** — `tools` are forwarded, calls come back as `tool_calls` with reassembled `arguments` and `finish_reason: "tool_calls"`, and a `tool` message resolves by its `tool_call_id`. When the assistant turn omits the id, the result's id wins instead of a freshly invented one — an upstream answers a call with no result with an empty reply.
+- **Images and files** — `image_url` / `input_image` and `file` / `input_file` are supported. Images: `data:` URLs are decoded, `http(s)` images are fetched by the gateway (25 MiB cap), and both are **committed to the host attachment store** (`ctx.attachments`) so the model receives durable image blocks rather than a URL only the caller can reach; images in one user message are admitted as a single batch, so the store's count and byte limits still apply, and a text-only model gets the host's placeholder line. Files: **anything readable as text is inlined** (`[attached file: name]` plus the content, up to 2 MiB, valid UTF-8 without NUL bytes); everything else (PDF, images, archives) is stored and handed over as a `file` block. A profile without an attachment store answers 400 instead of quietly sending text only.
 - **Reasoning and usage** — model reasoning is returned separately as `reasoning_content`; `usage` maps to `prompt_tokens` / `completion_tokens` / `total_tokens`, carrying reasoning and cache details when the provider reports them.
 - **`reasoning_effort` mapped to what the model really offers** — mapped onto the effort ids that target model advertises; an unsupported level degrades to the nearest advertised one or is dropped, never turned into a rejected request.
 - **`stop` fallback** — an adapter that refuses `stop` answers `UNSUPPORTED_OPTION`; the gateway notices and retries once without it instead of failing the request.
@@ -78,6 +79,25 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 ```
 
 3. Copy model ids from the page, or read them from `/v1/models`.
+
+4. Inline images the OpenAI way — a `data:` URL or an `http(s)` image address both work:
+
+```json
+{
+  "model": "workbuddy/glm-5.3-flash",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "What is in this image?" },
+        { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo…" } }
+      ]
+    }
+  ]
+}
+```
+
+Files work the same way: `{"type":"file","file":{"filename":"notes.txt","file_data":"data:text/plain;base64,…"}}`.
 
 ## Endpoints
 
@@ -143,7 +163,9 @@ Optional keys on the bundle row:
 
 ## Known limits
 
-- **External clients cannot send images or files**: a caller outside the session has no durable attachment reference, so those parts are dropped and only text is forwarded.
+- **Images follow the host's policy**: admission normalizes them (PNG/JPEG/WebP/GIF become one raster form), so the same picture may differ byte-for-byte between requests; the media types, count and aggregate byte limits are the attachment store's, and exceeding them answers 400 with the reason.
+- **`file` takes inline `file_data` only**: OpenAI's Files API keeps uploads in the caller's account, which this harness cannot reach, so a `file_id` is refused with a clear message instead of pretending.
+- **A binary file only yields a path**: the host hands a model a read-only copy's path (by design — the model is expected to open it with its own file tools). A model driven by an outside client has no such tools, so for PDFs, docx or archives it learns only that the file exists, how big it is and where — not its contents. Text files are inlined instead.
 - **Provider-injected notices pass through**: for example an account-pool failover line from upstream arrives as ordinary assistant text, neither swallowed nor rewritten.
 - **A profile with no web server (headless)** has no page and no control routes, but `/v1/*` still serves on the fixed port.
 - **Prefer `stream: true` for long work**: a non-streaming request writes nothing until the whole answer is ready, so any read timeout will hit it.

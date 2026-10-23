@@ -28,7 +28,8 @@
 - **密钥固化** —— 首次启动生成 `sk-dsh-…` 并写入 `$DSH_HOME/openai-gateway/settings.json`（0600），跨重启不变；页面上的 **生成** 按钮可换新（两步确认，旧钥立即失效）。旧版本的 `api-key` 文件会被自动迁移，已配置的客户端不受影响。
 - **侧边栏模型网关页** —— 打开即见接口地址、密钥（打码 / 显示 / 复制）、端口（可直接改，回车即应用），以及按 provider 折叠分组的完整模型清单：每个模型 ID 一个复制按钮，每组可整组复制，也可一键复制全部。
 - **流式与非流式都支持** —— `"stream": true` 返回标准 SSE（`data: …` 逐帧，`[DONE]` 收尾），非流式返回完整 `chat.completion`。
-- **工具调用** —— `tools` 正常转发，结果以 `tool_calls` 返回，`arguments` 的分片会被拼装完整，`finish_reason` 为 `tool_calls`；`tool` 消息按其 `tool_call_id` 回到对应调用。
+- **工具调用** —— `tools` 正常转发，结果以 `tool_calls` 返回，`arguments` 的分片会被拼装完整，`finish_reason` 为 `tool_calls`；`tool` 消息按其 `tool_call_id` 回到对应调用。assistant 侧漏了 `id` 时会按结果的 id 对齐，而不是另造一个（上游对「没有结果的调用」只会回空回复）。
+- **图片与文件** —— `image_url` / `input_image` 与 `file` / `input_file` 都支持。图片：`data:` URL 直接解码，`http(s)` 图片由网关抓取（上限 25 MiB），然后**存进宿主的附件库**（`ctx.attachments`），模型拿到的是持久化的图片块而不是只有调用方够得着的 URL；一条 user 消息里的多张图按一条批次入库，附件的张数与字节上限照旧生效，模型不支持图片时由宿主降级成一行说明文字。文件：**能当文本读的直接内联成文本**（`[attached file: name]` + 内容，2 MiB 以内、UTF-8 且无 NUL 字节），其余（PDF、图片、压缩包等）存进附件库并作为 `file` 块交给模型。没有附件服务的 profile 会明确回 400，而不是悄悄只发文本。
 - **推理内容与用量** —— 模型产出思考时以 `reasoning_content` 单独返回；`usage` 映射为 `prompt_tokens` / `completion_tokens` / `total_tokens`，有 reasoning / cache 细分时一并带上。
 - **`reasoning_effort` 按目标模型真实档位映射** —— 映射到该模型自己声明的档位集合；不支持的档位降到最接近的或直接丢弃，**不会**因此拒掉整个请求。
 - **对 `stop` 被拒的上游自动降级** —— 某些 adapter 不接受 `stop`，会先返回 `UNSUPPORTED_OPTION`；网关识别该情况后去掉 `stop` 重试一次，而不是把请求判死。
@@ -78,6 +79,25 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 ```
 
 3. 模型名直接从页面复制，或在 `/v1/models` 里查。
+
+4. 图片照 OpenAI 的写法内联即可（`data:` URL 或 `http(s)` 图片地址都行）：
+
+```json
+{
+  "model": "workbuddy/glm-5.3-flash",
+  "messages": [
+    {
+      "role": "user",
+      "content": [
+        { "type": "text", "text": "这张图里是什么？" },
+        { "type": "image_url", "image_url": { "url": "data:image/png;base64,iVBORw0KGgo…" } }
+      ]
+    }
+  ]
+}
+```
+
+文件同理，用 `{"type":"file","file":{"filename":"notes.txt","file_data":"data:text/plain;base64,…"}}`。
 
 ## 接口
 
@@ -143,7 +163,9 @@ bundle 行上可选：
 
 ## 已知边界
 
-- **外部客户端不能传图片与文件**：会话之外的调用方拿不到可持久化的附件引用，因此这部分会被丢弃，只转发文本。
+- **图片按宿主的策略处理**：入库时会做一次规范化（宿主把 PNG/JPEG/WebP/GIF 转成统一栅格），所以同一张图两次请求的字节可能不同；媒体类型、张数与总字节上限由附件库决定，超限回 400 并带出原因。
+- **`file` 只接受内联的 `file_data`**：OpenAI 的 Files API（`file_id`）把文件存在调用方账号里，本机 harness 拿不到，因此这种情况会明确报错而不是假装成功。
+- **二进制文件只能给到路径**：宿主交给模型的「文件」是一份只读副本的路径（这是它的设计：模型用自己的文件工具去读）。外部客户端调用的模型没有那些工具，所以二进制文件（PDF / docx / 压缩包）只能让模型知道「有这么个文件、多大、在哪」，读不到内容 —— 文本类文件才走内联。
 - **provider 注入的提示会原样透传**：例如账号池换号时上游返回的一行说明，会作为普通 assistant 文本出现，不会被网关吞掉或改写。
 - **没有 web server 的 profile（headless）**：没有页面与控制接口，但 `/v1/*` 仍按固定端口提供服务。
 - **长任务建议用 `stream: true`**：非流式请求在整段生成期间不会写出任何字节，任何读超时都会命中。

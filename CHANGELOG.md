@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.1.0 (2026-10-24)
+
+### Added
+
+- **图片与文件输入**（`image_url` / `input_image` / `file` / `input_file`）。之前这两类会被丢弃、只发文本，现在按宿主的附件模型真正接上：
+  - `data:` URL 直接解码；`http(s)` 图片由网关抓取（25 MiB 上限，30 秒超时）。
+  - 字节**先落进宿主的附件库**（挂载服务的 `saveImages` / `saveFile`，参考对象是 `{ attachmentId, name?, bytes }`），模型收到的是持久化的 `image` / `file` 块 —— 这是 adapter 唯一会发送的形式。只把 URL 转发给上游没有意义：上游读不到调用方的地址。
+  - 一个 user 消息里的多张图作为**一条批次**入库，附件库的张数与总字节上限照旧生效；超限的错误原样回 400。
+  - 模型不支持图片时，由宿主把它降级成一行说明文字（`[image omitted because this model accepts text only; …]`），网关不自己判死。
+  - **文本类文件直接内联**：≤2 MiB、UTF-8 可解码且不含 NUL 字节时，作为 `[attached file: name]` + 正文发进去。实测（`workbuddy/glm-5.3-flash`，文件内容 `the secret number is 4242`）能逐字读出 4242；而只给路径时模型答「我没有文件工具，读不到」—— 外部客户端调用的模型确实没有这些工具，所以内联才是可用的那一半。
+  - 其余文件（PDF / 图片 / 压缩包）存进附件库，作为 `file` 块交给模型；宿主把它呈现为一份只读副本的**路径**，模型只能知道文件存在、多大、在哪，读不到内容。这条边界写进了 README 的「已知边界」。
+  - 没有附件服务的 profile（例如极简 headless）遇到图片 / 文件回 **400** 并说明原因，而不是悄悄只发文本。
+  - `file` 只接受内联 `file_data`：OpenAI Files API 的 `file_id` 存在调用方账号里，本机 harness 拿不到，因此明确报错。
+- 回归检查新增：图片解码成 `image` 块（按序保留文本与图片位置）、`mediaType` 正确、文本文件被内联、二进制文件带 display name 入库、无附件服务时回 400。
+
+### Verified
+
+- 真机（`gwtest` profile，走 `ctx.llm` 的 `workbuddy` 适配器）：`workbuddy/glm-5.3-flash` 与 `workbuddy/deepseek-v4.1-flash` 对一张纯红 PNG 都答 `"Red"`；文本文件答出精确内容。`local`（Ollama）在本机未运行，纯文本请求也是 502 TRANSPORT，与本次改动无关。
+
+### Notes
+
+- 附件库会做一次规范化（PNG/JPEG/WebP/GIF → 统一栅格），同一张图两次请求的字节可能不同；这是宿主行为，网关不干预。
+- `estimateInputTokens` 只估算文本与工具声明，因此带大图的请求会低估输入体积（`maxInputTokens` 护栏对图片不敏感）。
+
 ## 1.0.8 (2026-10-23)
 
 ### Fixes
