@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.2 (2026-10-23)
+
+### Fixes
+
+- **页面上的模型清单会永久缺掉「后注册」的 provider（实测：WorkBuddy、Qoder 消失）**：侧边栏页面读的是状态文档里的目录快照，而这份快照有两个致命之处。其一，`warmCatalog()` 的重试条件是「这一遍拿到非空目录就停」，于是 DeepSeek 这类秒答的内置 provider 先返回 4 个模型就把预热结束了；而凭据要 `resolve()`、目录要访问上游的 adapter（WorkBuddy 的 `registerModelDiscovery`）几秒后才绑上，profile 里排在网关**后面**的插件（如 `@eghrhegpe/dsh-connect-qoder`）更是在预热早已停下之后才 `registerAdapter`。其二，`statusPayload()` 直接读 `state.catalog.entries`，**从不重建** —— 所以页面上的「刷新」按钮只是把同一份冻结快照再渲染一遍，用户点多少次都恢复不了，只有外部 OpenAI 客户端调用过 `/v1/models` 才会顺带更新。
+  - **预热改为「等 provider 集合稳定」**：不再是「一次非空即停」，而是每次 1 秒重读、连续两遍「已注册 provider 集合 + 已上报模型 provider 集合」完全一致、且已过 6 秒观察窗才停；30 次封顶，保证没有任何 provider 的 profile 也能正常启动。观察窗是必需的：插件绑定 provider 的时刻由它自己的异步初始化决定，网关无权假设「第 N 毫秒之后不会再有人来」。
+  - **状态路由按需重建**：`statusPayload()` 现在先 `await catalog(ctx, state, ttl, refresh)`，快照超过 TTL 就重建；重建失败退回旧快照并记一条 warn，绝不让一次发现失败把页面打成空白。
+  - **「刷新」按钮真的会刷新**：页面改为请求 `STATUS_PATH?refresh=1`，宿主侧用新增的 `refreshRequested(req.url)` 解析，命中就强制重建。改动前按钮发的是同一个无参 URL，语义上只等于「重画一遍」。
+- 新增回归检查 `tests/catalog-refresh.spec.mjs`（`npm test`）：用一个可在任意时刻绑定、且模型列表会滞后的假 host 驱动真实的 `apply()`，断言四件事 —— 预热会等到迟到的 provider、TTL 内的普通读仍然走缓存、`?refresh=1` 会强制重建、TTL 到期后的读会自动重建。**判据是「同一份测试在旧构建上失败、在新构建上通过」**：对 `1.0.1` 的 `index.js` 跑是 1/4 通过（失败的正是迟到 provider、强制刷新、TTL 重建三条），对 `1.0.2` 跑是 4/4。
+
 ## 1.0.1 (2026-10-23)
 
 ### Fixes

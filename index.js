@@ -30,6 +30,12 @@ const STATUS_PATH = `/plugins/${PLUGIN_ID}/status`
 const API_PREFIX = '/v1'
 const DEFAULT_BODY_LIMIT = 8 * 1024 * 1024
 const CATALOG_TTL_MS = 60_000
+/** How often the boot warm loop re-reads the catalog while adapters bind. */
+const WARM_INTERVAL_MS = 1_000
+/** Watch window before the warm loop accepts a settled provider set. */
+const WARM_SETTLE_MS = 6_000
+/** Hard stop, so a profile whose providers never answer still boots. */
+const WARM_ATTEMPTS = 30
 const KEY_PREFIX = 'sk-dsh-'
 /** Service keys for the HTTP surface, newest name first. */
 const WEB_SERVER_KEYS = ['webServer', 'httpServer']
@@ -139,7 +145,12 @@ export function apply(ctx, config) {
             sendJson(res, 403, { error: 'origin-not-trusted' })
             return
           }
-          sendJson(res, 200, statusPayload(ctx, state), { 'Cache-Control': 'no-store' })
+          // The page is the only caller. `?refresh=1` is what its Refresh
+          // button sends: re-read the catalog even when the snapshot is
+          // still inside the TTL, so the button does what it says.
+          statusPayload(ctx, state, catalogTtl, refreshRequested(req.url))
+            .then((payload) => sendJson(res, 200, payload, { 'Cache-Control': 'no-store' }))
+            .catch((error) => fail(res, error))
         },
       }),
       webServer.register({
@@ -537,22 +548,35 @@ async function catalog(ctx, state, ttl, refresh) {
 }
 
 /**
- * Retry the first catalog load until an adapter reports models, then stop.
- * A profile whose providers are all unconfigured simply exhausts the budget
- * and keeps serving an empty catalog.
+ * Watch the catalog until the set of reporting providers stops moving.
+ *
+ * One non-empty pass is not "warmed". The built-in providers answer from the
+ * host immediately, while an adapter that resolves a credential or fetches an
+ * upstream directory binds seconds later — and a plugin that sits after this
+ * one in the profile registers its provider after this loop has started.
+ * Stopping at the first non-empty pass therefore caches a catalog that never
+ * mentions them, and the page has no way to ask for a better one.
  */
 function warmCatalog(ctx, state, ttl) {
+  const startedAt = Date.now()
   let attempts = 0
+  let signature
   const tick = async () => {
     attempts += 1
     try {
       const entries = await catalog(ctx, state, ttl, true)
-      if (entries.length > 0) return
+      const reporting = [...new Set(entries.map((entry) => entry.provider))].sort().join(',')
+      const registered = ctx.llm.listProviders().map((provider) => provider.id).sort().join(',')
+      const current = `${registered}|${reporting}`
+      // Two identical passes after the settle window: everything that is
+      // going to answer has answered, and nothing is still arriving.
+      if (current === signature && Date.now() - startedAt >= WARM_SETTLE_MS) return
+      signature = current
     } catch (error) {
       logWarn(ctx, `catalog refresh failed: ${messageOf(error)}`)
     }
-    if (attempts >= 24) return
-    const timer = setTimeout(tick, 1500)
+    if (attempts >= WARM_ATTEMPTS) return
+    const timer = setTimeout(tick, WARM_INTERVAL_MS)
     timer.unref?.()
   }
   tick()
@@ -1113,9 +1137,31 @@ function baseUrlOf(state) {
     : `http://${LISTEN_HOST}:${state.listenPort}${API_PREFIX}`
 }
 
-function statusPayload(ctx, state) {
+/** `?refresh=1` (what the page's Refresh button sends) forces a rebuild. */
+function refreshRequested(url) {
+  const mark = typeof url === 'string' ? url.indexOf('?') : -1
+  if (mark < 0) return false
+  const flag = new URLSearchParams(url.slice(mark + 1)).get('refresh')
+  return flag === '1' || flag === 'true'
+}
+
+/**
+ * The page's single read. The catalog it carries is rebuilt first when the
+ * snapshot is older than the TTL, or when the caller forced a pass: the page
+ * renders exactly what this document says, so a snapshot that is never
+ * rebuilt turns a late-binding adapter into a provider that is missing from
+ * the UI until some unrelated OpenAI client happens to call `/v1/models`.
+ */
+async function statusPayload(ctx, state, ttl, refresh) {
+  let entries
+  try {
+    entries = await catalog(ctx, state, ttl, refresh)
+  } catch (error) {
+    logWarn(ctx, `catalog refresh failed: ${messageOf(error)}`)
+    entries = state.catalog.entries
+  }
   const counts = new Map()
-  for (const entry of state.catalog.entries) {
+  for (const entry of entries) {
     counts.set(entry.provider, (counts.get(entry.provider) ?? 0) + 1)
   }
   return {
@@ -1128,10 +1174,10 @@ function statusPayload(ctx, state) {
     listenError: state.listenError ?? null,
     apiKey: state.apiKey,
     settingsFile: state.store.persisted ? state.store.path : null,
-    modelCount: state.catalog.entries.length,
+    modelCount: entries.length,
     // The catalog travels with the status document: the page is same-origin
     // with this route, while `/v1/models` is on the gateway's own port.
-    models: state.catalog.entries.map((entry) => ({
+    models: entries.map((entry) => ({
       id: modelKey(entry),
       provider: entry.provider,
       ...(entry.model.name === entry.model.id ? {} : { name: entry.model.name }),

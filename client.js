@@ -295,10 +295,14 @@ window.__ModuleLoader__.load({
 			// `/v1/models` lives on the gateway's own port, so asking for it from
 			// this page would be a cross-origin call — and would leave the list
 			// empty whenever the browser refused it.
-			const load = useCallback(async () => {
+			//
+			// `force` is what the Refresh button passes: the host rebuilds the
+			// catalog instead of replaying the snapshot it already has, so a
+			// provider that bound its adapter late still shows up on demand.
+			const load = useCallback(async (force = false) => {
 				setFailed(false);
 				try {
-					const response = await fetch(STATUS_PATH, {
+					const response = await fetch(force ? `${STATUS_PATH}?refresh=1` : STATUS_PATH, {
 						cache: "no-store",
 						credentials: "same-origin",
 						headers: { Accept: "application/json" },
@@ -557,7 +561,7 @@ window.__ModuleLoader__.load({
 											: t("page.copyAll"),
 									)
 								: null,
-							h("button", { type: "button", className: "gw-btn is-quiet", onClick: load }, t("page.refresh")),
+							h("button", { type: "button", className: "gw-btn is-quiet", onClick: () => load(true) }, t("page.refresh")),
 						),
 					),
 					status === null
