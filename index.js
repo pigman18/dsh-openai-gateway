@@ -21,7 +21,8 @@
  */
 import { Buffer } from 'node:buffer'
 import { randomBytes, randomUUID, timingSafeEqual } from 'node:crypto'
-import { chmodSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -78,6 +79,22 @@ const LISTEN_HOST = '127.0.0.1'
 /** Control routes for the sidebar page, mounted on the harness web server. */
 const SETTINGS_ROUTE = `/plugins/${PLUGIN_ID}/settings`
 const KEY_ROUTE = `/plugins/${PLUGIN_ID}/key`
+const ALIAS_ROUTE = `/plugins/${PLUGIN_ID}/aliases`
+const TUNNEL_ROUTE = `/plugins/${PLUGIN_ID}/tunnel`
+/** Tunnel providers the plugin can supervise itself. */
+const TUNNEL_PROVIDERS = new Set(['ngrok', 'cloudflared'])
+/** How long a spawned tunnel may take to publish its public URL. */
+const TUNNEL_START_TIMEOUT_MS = 25_000
+/**
+ * Public URL shapes each provider prints. Matching the hostname rather than a
+ * log field keeps all three ngrok formats working — `--log-format json` emits
+ * `"url":"https://…"`, the text log prints `url=https://…`, and the default
+ * human log says `Forwarding  https://…`.
+ */
+const TUNNEL_URL_PATTERNS = {
+  ngrok: /https:\/\/[a-z0-9-]+\.ngrok-free\.(?:dev|app)/g,
+  cloudflared: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/g,
+}
 
 /** Cordis plugin name, surfaced in diagnostics. */
 export const name = PLUGIN_ID
@@ -106,6 +123,13 @@ export const inject = ['llm']
  *                    is used when the provider publishes one)
  *   maxMessages    — drop the oldest turns beyond this many, always keeping
  *                    the history starting at a `user` message (default 0 = off)
+ *   publicBaseUrl  — the address external clients should use (default: the
+ *                    loopback one; set it to a tunnel hostname such as
+ *                    `https://gw.example.com` and the page prints that)
+ *   tunnel         — `{ provider, autostart }` lets the gateway supervise a
+ *                    `ngrok` / `cloudflared` process itself
+ *   aliases        — `{ "gpt-4o": "provider/model", … }` extra names a client
+ *                    may send; the catalog advertises them too
  */
 export function apply(ctx, config) {
   const settings = config ?? {}
@@ -127,12 +151,17 @@ export function apply(ctx, config) {
     maxInputTokens: nonNegativeInteger(settings.maxInputTokens),
     maxMessages: nonNegativeInteger(settings.maxMessages),
   }
+  // An external hostname the caller supplies wins over anything the stored
+  // settings or a supervised tunnel later reports.
+  const publicBaseUrl = normalizeBaseUrl(settings.publicBaseUrl)
+  const tunnelConfig = resolveTunnelConfig(settings.tunnel)
 
   // Persisted state lives in one plugin-owned file under the Harness home:
   // a configured external client then survives every restart.
   const store = loadStore(ctx, {
     portOverride: Number.isFinite(settings.port) ? clampPort(settings.port) : undefined,
     apiKeyPinned: typeof settings.apiKey === 'string' ? settings.apiKey.trim() : '',
+    aliases: normalizeAliases(settings.aliases),
   })
 
   const state = {
@@ -148,10 +177,39 @@ export function apply(ctx, config) {
     requests: 0,
     failures: 0,
     recent: [],
+    // Rolling totals for the dashboard. Deliberately not persisted: these
+    // describe this process's lifetime, which is what "since 09:41" on the
+    // page means. A restart zeroes them along with `requests`.
+    usageTotals: {
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+      reasoningTokens: 0,
+      cacheReadTokens: 0,
+      // Only requests that reported usage of their own are counted here, so
+      // this number is the denominator for the token figures beside it.
+      calls: 0,
+    },
+    // Bytes that crossed the OpenAI surface, in and out. Headers are not
+    // counted; bodies and SSE frames are, which is the traffic a tile can
+    // honestly report.
+    bytes: { in: 0, out: 0 },
     server: undefined,
     listenPort: undefined,
     portFallback: false,
     listenError: undefined,
+    // External addressing: a configured hostname is authoritative; a tunnel
+    // this plugin supervises only fills the gap while it is up.
+    publicBaseUrl,
+    tunnelConfig,
+    tunnel: {
+      status: 'idle',
+      provider: tunnelConfig.provider ?? null,
+      url: undefined,
+      error: undefined,
+      pid: undefined,
+      startedAt: undefined,
+    },
   }
 
   // One dispatcher shared by the listener; `route` is a hoisted declaration.
@@ -167,9 +225,13 @@ export function apply(ctx, config) {
     // the page and the routing table should be usable before the first
     // external request arrives.
     warmCatalog(ctx, state, catalogTtl)
-    startListener(ctx, state).catch((error) => {
-      logWarn(ctx, `could not start the gateway listener: ${messageOf(error)}`)
-    })
+    startListener(ctx, state)
+      .then(() => {
+        if (state.tunnelConfig.autostart) startTunnel(ctx, state)
+      })
+      .catch((error) => {
+        logWarn(ctx, `could not start the gateway listener: ${messageOf(error)}`)
+      })
   }
 
   // `webServer` belongs to the web app entry, which under concurrent
@@ -217,6 +279,20 @@ export function apply(ctx, config) {
           control(ctx, req, res, () => rotateKey(ctx, state, req, res, bodyLimit))
         },
       }),
+      webServer.register({
+        kind: 'exact',
+        path: ALIAS_ROUTE,
+        handler: (req, res) => {
+          control(ctx, req, res, () => applyAliases(ctx, state, req, res, bodyLimit))
+        },
+      }),
+      webServer.register({
+        kind: 'exact',
+        path: TUNNEL_ROUTE,
+        handler: (req, res) => {
+          control(ctx, req, res, () => applyTunnel(ctx, state, req, res, bodyLimit))
+        },
+      }),
     ]
 
     ctx.effect(
@@ -235,10 +311,15 @@ export function apply(ctx, config) {
 
   ctx.effect(
     () => () => {
+      stopTunnel(ctx, state)
       closeListener(state)
     },
     `${PLUGIN_ID}: listener`,
   )
+
+  // The live state, so a test (or a host that wants the bound port) can read
+  // what this instance actually did instead of re-deriving it.
+  return state
 
   /** Dispatch one `/v1/*` request on the gateway's own listener. */
   async function route(req, res) {
@@ -311,13 +392,25 @@ async function handleModels(ctx, state, ttl, url, res) {
   const entries = await catalog(ctx, state, ttl, url.searchParams.get('refresh') === '1')
   sendJson(res, 200, {
     object: 'list',
-    data: entries.map((entry) => ({
-      id: modelKey(entry),
-      object: 'model',
-      created: 0,
-      owned_by: entry.provider,
-      ...(entry.model.name === entry.model.id ? {} : { name: entry.model.name }),
-    })),
+    data: [
+      ...entries.map((entry) => ({
+        id: modelKey(entry),
+        object: 'model',
+        created: 0,
+        owned_by: entry.provider,
+        ...(entry.model.name === entry.model.id ? {} : { name: entry.model.name }),
+      })),
+      // Aliases are listed beside the real ids: a client that only knows the
+      // name it was configured with (Cursor sends its own ids) discovers that
+      // the gateway honours it, instead of guessing from the error.
+      ...aliasEntries(state).map((alias) => ({
+        id: alias.alias,
+        object: 'model',
+        created: 0,
+        owned_by: alias.target.split('/')[0],
+        alias_of: alias.target,
+      })),
+    ],
   })
 }
 
@@ -328,6 +421,11 @@ async function handleModel(ctx, state, ttl, rest, res) {
     entries.find((entry) => modelKey(entry) === wanted) ??
     entries.find((entry) => entry.model.id === wanted)
   if (found === undefined) {
+    const alias = state.store.aliases[wanted]
+    if (alias !== undefined) {
+      sendJson(res, 200, { id: wanted, object: 'model', created: 0, alias_of: alias })
+      return
+    }
     sendError(res, 404, 'invalid_request_error', `model ${wanted} is not registered`, {
       code: 'model_not_found',
     })
@@ -348,9 +446,14 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
   try {
     body = await readBody(req, bodyLimit)
   } catch (error) {
+    chargeInbound(state, req)
     sendError(res, 400, 'invalid_request_error', messageOf(error))
     return
   }
+  // Only the OpenAI surface is metered: the control routes are the dashboard
+  // talking to itself, and counting them would inflate the traffic tile with
+  // page refreshes instead of client traffic.
+  chargeInbound(state, req)
 
   const requested = typeof body.model === 'string' ? body.model.trim() : ''
   if (requested.length === 0) {
@@ -369,6 +472,13 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
     textBytes: 0,
     reasoningBytes: 0,
   }
+
+  // Traffic out of the OpenAI surface is measured by wrapping the two write
+  // paths a response can take, so JSON bodies and SSE frames are counted by
+  // the same rule. The control routes never pass through here, so a dashboard
+  // refresh cannot inflate the tile. The fold happens on `finish`/`close`, so
+  // every early return below is already covered.
+  meterWrites(res, state)
 
   try {
     let call
@@ -425,6 +535,9 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
     trace.message = messageOf(error)
     throw error
   } finally {
+    // `res.__gwOutBytes` is final only after the answer finished, so the
+    // response total is folded in here rather than inside the senders.
+    foldOutBytes(res, state)
     recordRequest(ctx, state, trace)
   }
 }
@@ -796,7 +909,7 @@ function modelKey(entry) {
   return `${entry.provider}/${entry.model.id}`
 }
 
-/** Resolve `provider/model`, or an unambiguous bare model id. */
+/** Resolve `provider/model`, a configured alias, or an unambiguous bare id. */
 async function resolveRoute(ctx, state, ttl, requested) {
   const providers = ctx.llm.listProviders().map((provider) => provider.id)
   const slash = requested.indexOf('/')
@@ -807,6 +920,19 @@ async function resolveRoute(ctx, state, ttl, requested) {
   }
   if (providers.includes(requested)) return undefined
 
+  // An alias is resolved before the catalog is consulted: the whole point of
+  // one is to name a model the caller cannot address unambiguously, and a
+  // colliding bare id would otherwise throw before the alias is considered.
+  const alias = state.store.aliases[requested]
+  if (alias !== undefined) {
+    const cut = alias.indexOf('/')
+    if (cut > 0) {
+      const provider = alias.slice(0, cut)
+      const model = alias.slice(cut + 1)
+      if (providers.includes(provider) && model.length > 0) return { provider, model }
+    }
+  }
+
   const matches = (await catalog(ctx, state, ttl, false)).filter(
     (entry) => entry.model.id === requested,
   )
@@ -815,10 +941,56 @@ async function resolveRoute(ctx, state, ttl, requested) {
     throw new Error(
       `model ${requested} exists on several providers (${matches
         .map((entry) => entry.provider)
-        .join(', ')}); address it as "<provider>/${requested}"`,
+        .join(', ')}); address it as "<provider>/${requested}", or add an alias for it`,
     )
   }
   return undefined
+}
+
+/* ---------------------------------------------------------------- aliases */
+
+/**
+ * Aliases as `{ alias, target }` pairs. An alias that names a provider the
+ * profile no longer registers is still advertised: dropping it silently would
+ * turn a stale entry into a mystery 404 at the client, while keeping it lets
+ * the request fail with the adapter's own answer.
+ */
+function aliasEntries(state) {
+  return Object.entries(state.store.aliases).map(([alias, target]) => ({ alias, target }))
+}
+
+/**
+ * Accept only `{"name": "provider/model"}` pairs. Anything else is dropped
+ * rather than rejected: a partially useful table beats a boot failure, and
+ * the page's own write route validates the shape it sends.
+ */
+function normalizeAliases(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) return {}
+  const aliases = {}
+  for (const [alias, target] of Object.entries(input)) {
+    const name = typeof alias === 'string' ? alias.trim() : ''
+    const value = typeof target === 'string' ? target.trim() : ''
+    if (name.length === 0 || value.length === 0) continue
+    // An alias without a provider prefix cannot be resolved deterministically;
+    // the caller should name the model it means.
+    if (value.indexOf('/') <= 0) continue
+    aliases[name] = value
+  }
+  return aliases
+}
+
+/** `https://host/path` without a trailing slash, or undefined when unusable. */
+function normalizeBaseUrl(value) {
+  if (typeof value !== 'string') return undefined
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return undefined
+  try {
+    const url = new URL(trimmed)
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') return undefined
+    return `${url.origin}${url.pathname.replace(/\/+$/, '')}`
+  } catch {
+    return undefined
+  }
 }
 
 /** Every `{provider, model}` pair the host currently advertises. */
@@ -1054,10 +1226,36 @@ function recordRequest(ctx, state, trace) {
   trace.ms = Date.now() - trace.at
   state.recent.unshift(trace)
   if (state.recent.length > RECENT_LIMIT) state.recent.length = RECENT_LIMIT
+  // Every request ends here — succeeded, refused, aborted — so this is the one
+  // place totals can be accumulated without a second code path to keep in sync.
+  addUsageTotals(state.usageTotals, trace.usage)
   const where = `${trace.model} ${trace.stream ? 'stream' : 'blocking'} ${trace.ms}ms`
   const why = trace.code === undefined ? '' : ` ${trace.code}: ${String(trace.message ?? '').slice(0, 200)}`
   if (trace.outcome === 'ok') logInfo(ctx, `request ${where}${why}`)
   else logWarn(ctx, `request ${where} ended ${trace.outcome}${why}`)
+}
+
+/**
+ * Fold one request's upstream usage into the running totals.
+ *
+ * Adapters that do not report usage leave the totals untouched rather than
+ * adding a zero: the tile then reads "0 tokens from 0 calls", which is
+ * truthful, instead of a number diluted by requests that were never measured.
+ */
+function addUsageTotals(totals, usage) {
+  if (usage === undefined || usage === null) return
+  const input = Number(usage.inputTokens)
+  const output = Number(usage.outputTokens)
+  if (!Number.isFinite(input) && !Number.isFinite(output)) return
+  const safeInput = Number.isFinite(input) ? input : 0
+  const safeOutput = Number.isFinite(output) ? output : 0
+  const total = Number.isFinite(Number(usage.totalTokens)) ? Number(usage.totalTokens) : safeInput + safeOutput
+  totals.inputTokens += safeInput
+  totals.outputTokens += safeOutput
+  totals.totalTokens += total
+  if (Number.isFinite(Number(usage.reasoningTokens))) totals.reasoningTokens += Number(usage.reasoningTokens)
+  if (Number.isFinite(Number(usage.cacheReadTokens))) totals.cacheReadTokens += Number(usage.cacheReadTokens)
+  totals.calls += 1
 }
 
 /** Whether a failure is one the host would retry. */
@@ -1569,7 +1767,7 @@ function clampPort(value) {
  * `portOverride` (an explicit bundle config port) wins over the stored one.
  * Persistence failures are not fatal: the values still apply to this process.
  */
-function loadStore(ctx, { portOverride, apiKeyPinned }) {
+function loadStore(ctx, { portOverride, apiKeyPinned, aliases }) {
   const dir = join(dshHome(), KEY_DIRNAME)
   const path = join(dir, SETTINGS_FILENAME)
   let stored = {}
@@ -1593,7 +1791,13 @@ function loadStore(ctx, { portOverride, apiKeyPinned }) {
       : Number.isFinite(stored.port)
         ? clampPort(stored.port)
         : DEFAULT_PORT
-  const store = { path, dir, port, apiKey, persisted: false }
+  // Bundle config aliases win; the stored table is the fallback, so a profile
+  // that pins them in YAML keeps them across a settings write.
+  const aliasTable =
+    aliases !== undefined && Object.keys(aliases).length > 0
+      ? aliases
+      : normalizeAliases(stored.aliases)
+  const store = { path, dir, port, apiKey, aliases: aliasTable, persisted: false }
   saveStore(ctx, store)
   return store
 }
@@ -1614,7 +1818,11 @@ function mintKey() {
 function saveStore(ctx, store) {
   try {
     mkdirSync(store.dir, { recursive: true })
-    writeFileSync(store.path, `${JSON.stringify({ port: store.port, apiKey: store.apiKey }, null, 2)}\n`, {
+    const body = { port: store.port, apiKey: store.apiKey }
+    // Only persisted when non-empty: an empty table would otherwise erase a
+    // profile's YAML aliases on the next boot.
+    if (Object.keys(store.aliases ?? {}).length > 0) body.aliases = store.aliases
+    writeFileSync(store.path, `${JSON.stringify(body, null, 2)}\n`, {
       mode: 0o600,
     })
     try {
@@ -1780,9 +1988,225 @@ async function rotateKey(ctx, state, req, res, bodyLimit) {
   sendJson(res, 200, { apiKey: state.apiKey })
 }
 
+/** Replace the whole alias table. `{}` clears it. */
+async function applyAliases(ctx, state, req, res, bodyLimit) {
+  let body
+  try {
+    body = await readBody(req, bodyLimit)
+  } catch (error) {
+    sendJson(res, 400, { error: messageOf(error) })
+    return
+  }
+  const incoming = body.aliases
+  if (incoming !== undefined && incoming !== null) {
+    if (typeof incoming !== 'object' || Array.isArray(incoming)) {
+      sendJson(res, 400, {
+        error: 'aliases-invalid',
+        message: 'aliases must be an object of {"name":"provider/model"} pairs',
+      })
+      return
+    }
+    // A target that is not `provider/model` cannot be routed, so the write is
+    // refused here instead of leaving an alias that always 404s.
+    for (const [alias, target] of Object.entries(incoming)) {
+      const value = typeof target === 'string' ? target.trim() : ''
+      if (value.length === 0 || value.indexOf('/') <= 0) {
+        sendJson(res, 400, {
+          error: 'alias-target-invalid',
+          message: `alias "${alias}" must point at "provider/model"`,
+        })
+        return
+      }
+    }
+  }
+  state.store.aliases = normalizeAliases(incoming ?? {})
+  saveStore(ctx, state.store)
+  sendJson(res, 200, { aliases: { ...state.store.aliases } })
+}
+
+/* --------------------------------------------------------------- tunnel */
+
+/** `{ provider, autostart }`, ignoring anything the plugin cannot supervise. */
+function resolveTunnelConfig(input) {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return { provider: undefined, autostart: false }
+  }
+  const provider =
+    typeof input.provider === 'string' && TUNNEL_PROVIDERS.has(input.provider.trim())
+      ? input.provider.trim()
+      : undefined
+  return { provider, autostart: input.autostart === true && provider !== undefined }
+}
+
+/**
+ * Start the configured tunnel as a child process and watch its output for the
+ * public URL it prints. The child is owned by this plugin: it is killed on
+ * dispose, so a reloaded profile does not leave an orphan holding the port.
+ */
+function startTunnel(ctx, state) {
+  const provider = state.tunnel.provider ?? state.tunnelConfig.provider
+  if (provider === undefined) {
+    state.tunnel.status = 'unconfigured'
+    return
+  }
+  if (state.tunnel.status === 'starting' || state.tunnel.status === 'running') return
+  const port = state.listenPort
+  if (port === undefined) {
+    state.tunnel.status = 'failed'
+    state.tunnel.error = 'the gateway listener is not up yet'
+    return
+  }
+
+  const binary = provider === 'ngrok' ? 'ngrok' : 'cloudflared'
+  const args =
+    provider === 'ngrok'
+      ? ['http', String(port), '--log', 'stdout', '--log-format', 'json']
+      : ['tunnel', '--url', `http://${LISTEN_HOST}:${port}`, '--no-autoupdate']
+
+  state.tunnel.status = 'starting'
+  state.tunnel.provider = provider
+  state.tunnel.url = undefined
+  state.tunnel.error = undefined
+  state.tunnel.startedAt = Date.now()
+
+  let child
+  try {
+    child = spawn(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  } catch (error) {
+    state.tunnel.status = 'failed'
+    state.tunnel.error = `could not run ${binary}: ${messageOf(error)}`
+    return
+  }
+  state.tunnel.pid = child.pid
+
+  let settled = false
+  const finish = (status, error) => {
+    if (settled) return
+    settled = true
+    state.tunnel.status = status
+    if (error !== undefined) state.tunnel.error = error
+    clearTimeout(timer)
+  }
+
+  const timer = setTimeout(() => {
+    // No URL after the window: report it rather than waiting forever, but
+    // leave the child running — it may still publish, and the status route
+    // keeps reading its output.
+    if (state.tunnel.url === undefined) {
+      finish('failed', `no public URL from ${binary} within ${TUNNEL_START_TIMEOUT_MS / 1000}s`)
+    }
+  }, TUNNEL_START_TIMEOUT_MS)
+  timer.unref?.()
+
+  const readLine = (chunk) => {
+    // The URL is matched anywhere in the chunk rather than only at the start
+    // of a line: a JSON log record carries it mid-string, and ngrok can emit
+    // several records in one chunk.
+    const matches = String(chunk).match(TUNNEL_URL_PATTERNS[provider])
+    const url = matches === null ? undefined : matches[matches.length - 1]
+    if (url === undefined || url === state.tunnel.url) return
+    state.tunnel.url = url
+    finish('running')
+    logInfo(ctx, `tunnel up at ${url}`)
+  }
+
+  child.stdout?.on('data', readLine)
+  child.stderr?.on('data', readLine)
+
+  child.on('error', (error) => {
+    finish('failed', `could not run ${binary}: ${messageOf(error)}`)
+    logWarn(ctx, `tunnel ${provider} failed: ${messageOf(error)}`)
+  })
+  child.on('exit', (code) => {
+    if (state.tunnel.child !== child) return
+    state.tunnel.child = undefined
+    state.tunnel.pid = undefined
+    // An exit before the URL arrived is a failure the page should show; one
+    // after it is just the tunnel being taken down.
+    if (state.tunnel.url === undefined) finish('failed', `${binary} exited with code ${code}`)
+    else state.tunnel.status = 'stopped'
+  })
+
+  state.tunnel.child = child
+}
+
+function stopTunnel(ctx, state) {
+  const child = state.tunnel.child
+  state.tunnel.child = undefined
+  state.tunnel.pid = undefined
+  state.tunnel.url = undefined
+  if (child === undefined) {
+    if (state.tunnel.status === 'running') state.tunnel.status = 'stopped'
+    return
+  }
+  try {
+    child.kill()
+  } catch (error) {
+    logWarn(ctx, `could not stop the tunnel: ${messageOf(error)}`)
+  }
+  state.tunnel.status = 'stopped'
+}
+
+/** `{ action: "start" | "stop", provider? }` from the page. */
+async function applyTunnel(ctx, state, req, res, bodyLimit) {
+  let body
+  try {
+    body = await readBody(req, bodyLimit)
+  } catch (error) {
+    sendJson(res, 400, { error: messageOf(error) })
+    return
+  }
+  const action = body.action
+  if (action !== 'start' && action !== 'stop') {
+    sendJson(res, 400, {
+      error: 'unknown-action',
+      message: 'expected {"action":"start"} or {"action":"stop"}',
+    })
+    return
+  }
+  if (action === 'stop') {
+    stopTunnel(ctx, state)
+    sendJson(res, 200, tunnelPayload(state))
+    return
+  }
+  if (typeof body.provider === 'string' && TUNNEL_PROVIDERS.has(body.provider.trim())) {
+    state.tunnelConfig.provider = body.provider.trim()
+  }
+  startTunnel(ctx, state)
+  sendJson(res, 200, tunnelPayload(state))
+}
+
+function tunnelPayload(state) {
+  return {
+    tunnel: {
+      status: state.tunnel.status,
+      provider: state.tunnel.provider ?? null,
+      url: state.tunnel.url ?? null,
+      error: state.tunnel.error ?? null,
+      pid: state.tunnel.pid ?? null,
+      autostart: state.tunnelConfig.autostart,
+    },
+  }
+}
+
 /* --------------------------------------------------------------- status */
 
+/**
+ * The address an external client should use. A hostname configured for the
+ * profile is authoritative; a supervised tunnel's published URL fills the gap
+ * only while it is up, so the page never advertises a dead endpoint as the
+ * primary one.
+ */
 function baseUrlOf(state) {
+  if (state.publicBaseUrl !== undefined) return state.publicBaseUrl
+  if (state.tunnel.url !== undefined) return `${state.tunnel.url.replace(/\/+$/, '')}${API_PREFIX}`
+  return state.listenPort === undefined
+    ? null
+    : `http://${LISTEN_HOST}:${state.listenPort}${API_PREFIX}`
+}
+
+/** The loopback address, always, for clients that are on this machine. */
+function localBaseUrlOf(state) {
   return state.listenPort === undefined
     ? null
     : `http://${LISTEN_HOST}:${state.listenPort}${API_PREFIX}`
@@ -1819,6 +2243,7 @@ async function statusPayload(ctx, state, ttl, refresh) {
     id: PLUGIN_ID,
     enabled: state.enabled,
     baseUrl: baseUrlOf(state),
+    localBaseUrl: localBaseUrlOf(state),
     port: state.listenPort ?? null,
     preferredPort: state.store.port,
     portFallback: state.portFallback,
@@ -1833,6 +2258,15 @@ async function statusPayload(ctx, state, ttl, refresh) {
       provider: entry.provider,
       ...(entry.model.name === entry.model.id ? {} : { name: entry.model.name }),
     })),
+    aliases: aliasEntries(state),
+    tunnel: {
+      status: state.tunnel.status,
+      provider: state.tunnel.provider ?? null,
+      url: state.tunnel.url ?? null,
+      error: state.tunnel.error ?? null,
+      pid: state.tunnel.pid ?? null,
+      autostart: state.tunnelConfig.autostart,
+    },
     providers: ctx.llm.listProviders().map((provider) => ({
       id: provider.id,
       name: typeof provider.name === 'string' ? provider.name : provider.id,
@@ -1840,6 +2274,11 @@ async function statusPayload(ctx, state, ttl, refresh) {
     })),
     requests: state.requests,
     failures: state.failures,
+    // Totals for this process only, accumulated in `recordRequest`. Not
+    // persisted: they reset with the gateway, and the page labels them with
+    // `startedAt` so "since 09:41" is read correctly.
+    usageTotals: { ...state.usageTotals },
+    bytes: { ...state.bytes },
     // Newest first. This is what turns "it dropped again" into a cause: the
     // model, how many attempts it took, how long the first byte took, and the
     // adapter's own code when it ended badly.
@@ -1996,6 +2435,9 @@ function readBody(req, limit) {
       chunks.push(chunk)
     })
     req.on('end', () => {
+      // The exact byte count, for callers that meter traffic. Recorded here
+      // because this is the only place the body is fully seen.
+      req.bodyBytes = size
       let parsed
       try {
         parsed = JSON.parse(Buffer.concat(chunks).toString('utf8'))
@@ -2011,6 +2453,66 @@ function readBody(req, limit) {
     })
     req.on('error', reject)
   })
+}
+
+/** Bytes `readBody` measured, or 0 when the body was never read. */
+function byteLengthOf(req) {
+  return Number.isFinite(req.bodyBytes) ? req.bodyBytes : 0
+}
+
+/** Fold the request body's bytes into the inbound total, at most once. */
+function chargeInbound(state, req) {
+  const bytes = byteLengthOf(req)
+  if (bytes <= 0) return
+  state.bytes.in += bytes
+}
+
+/**
+ * Count the bytes a response actually sends, and fold the total into `state`
+ * once the response is done.
+ *
+ * Every OpenAI-surface answer leaves through `res.write` (SSE frames) or
+ * `res.end(payload)` (a JSON body), so wrapping both covers streaming and
+ * blocking without threading a counter through each sender. Headers are not
+ * counted: they are a fixed cost the caller cannot act on.
+ *
+ * The fold is idempotent and hangs off both `finish` and `close`, so an
+ * aborted stream still reports the bytes it managed to send, and a route that
+ * returns early — a 400 for a malformed body, a 404 for an unknown model —
+ * cannot silently skip the counter the way a `finally` block would.
+ */
+function meterWrites(res, state) {
+  if (res.__gwMetered === true) return
+  res.__gwMetered = true
+  res.__gwOutBytes = 0
+  const write = res.write.bind(res)
+  const end = res.end.bind(res)
+  res.write = (chunk, ...rest) => {
+    if (typeof chunk === 'string') res.__gwOutBytes += Buffer.byteLength(chunk)
+    else if (Buffer.isBuffer(chunk)) res.__gwOutBytes += chunk.length
+    return write(chunk, ...rest)
+  }
+  res.end = (chunk, ...rest) => {
+    if (typeof chunk === 'string') res.__gwOutBytes += Buffer.byteLength(chunk)
+    else if (Buffer.isBuffer(chunk)) res.__gwOutBytes += chunk.length
+    return end(chunk, ...rest)
+  }
+  const fold = () => {
+    if (res.__gwFolded === true) return
+    res.__gwFolded = true
+    state.bytes.out += res.__gwOutBytes
+  }
+  if (typeof res.once === 'function') {
+    res.once('finish', fold)
+    res.once('close', fold)
+  }
+}
+
+/** Fold a metered response's total in now, for a caller that cannot wait. */
+function foldOutBytes(res, state) {
+  if (res.__gwMetered !== true || res.__gwFolded === true) return
+  res.__gwFolded = true
+  state.bytes.out += res.__gwOutBytes
 }
 
 function messageOf(error) {

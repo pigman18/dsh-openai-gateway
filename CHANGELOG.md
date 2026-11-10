@@ -1,5 +1,69 @@
 # Changelog
 
+## 1.3.0 (2026-11-06)
+
+### Changed
+
+- **侧边栏页面重做为仪表盘**。原来的页面是单列 880px、没有层级、字号写死 11/12px、状态点用品牌蓝冒充「运行中」，而状态文档里早就有 `requests` / `failures` / `models` / `providers` / `startedAt` / `recent`（含真实 `usage`）—— **一条都没显示**。这次按宿主 UI 规范重建：
+  - **吸顶页头**：标题 + 副标题，右侧运行状态药丸与刷新按钮，滚动时保持可见。
+  - **五块指标**：请求数（含失败数）、模型数与 provider 数、令牌用量（入 / 出）、流量（进 / 出）、运行时长（自启动时刻起）。
+  - **两列卡片**（≥900px 时并排，窄屏回落单列）：对外地址与本机地址（含端口直接修改）、隧道（状态 / 启停 / 地址 / 失败原因）、密钥（打码 / 显示 / 复制 / 两步确认换新）、模型别名（增删 + 保存）。
+  - **可搜索模型目录**：按宿主 provider 顺序分组折叠，支持按 ID / 名称 / provider 过滤；搜索时命中的组自动展开。每行、每组、全部都有复制按钮。
+  - **最近请求表**：时间、模型、成功或失败码徽标、令牌进→出、耗时；空态与「无用量」都给出明确文案而不是 `0 → 0`。
+  - **修正状态色语义**：`.gw-dot.is-on` 原来指向 `--dsw-alias-state-business-primary`（解析到品牌蓝 `--dsw-static-deepseek-500`），绿值只是永不生效的 fallback。改用 `--dsw-alias-state-success-primary` / `--dsw-alias-state-error-primary` / `--dsw-alias-state-idle-primary`。
+  - **全部视觉取自宿主 token**：颜色、边框、圆角、阴影、字号一律 `var(--dsw-*)`，零硬编码色值（`tests/style-tokens.spec.mjs` 强制）；排版用 `font: var(--dsw-font-xs-13)` 这类**简写** token（`--dsw-font-xs-12` / `-xs-11` / `-m-16` 在主题里**不存在**）。间距用页面自有刻度 `--gw-s1..s6`。
+  - 新增文案全部走 locale 字典（`zh` / `en` 对齐，键集一致）。
+
+### Added
+
+- **`usageTotals` 与 `bytes` 累计**（状态文档新增两字段，页面据此渲染令牌与流量磁贴）：
+  - `usageTotals: { inputTokens, outputTokens, totalTokens, reasoningTokens, cacheReadTokens, calls }` —— 在 `recordRequest`（每个请求的 `finally`，成功 / 拒绝 / 中止都经过）里累加。**只统计上游真的报了 `usage` 的请求**，未报的不加零、也不增 `calls`，避免数字被摊薄。
+  - `bytes: { in, out }` —— 只统计 `/v1` 表面。入站由 `readBody` 记录真实字节数（**解析失败也计入**，字节确实到达了）；出站包住 `res.write` / `res.end` 两个出口，因此 JSON 体与 SSE 帧同一规则，且挂在 `finish` / `close` 上，任何提前 `return`（400 / 404）都不会漏计。控制接口的往返**不计入**，否则刷新页面会把流量撑大。
+  - 两者**不持久化**：只描述本次进程生命周期，重启归零，页面用 `startedAt` 标注「自 HH:MM 起」。
+
+### Tests
+
+- 新增 `tests/usage-totals.spec.mjs`（**7/7**）：真实 `index.js` + 真实 HTTP 请求，覆盖「报用量的请求累加」「不报用量的请求不加零也不增 calls」「多次请求累加且与 `recent` 各行求和一致」「进出字节都被测量且入站等于客户端实际发送量」「被拒绝的请求仍计其入站字节但零令牌」「畸形请求体被拒前已计费」「新实例全零且带 `startedAt`」。
+- 新增 `tests/style-tokens.spec.mjs`（**1/1**）：解析 `client.js` 里的样式表，要求每个承载颜色的声明都以 `var(--dsw-` 开头（`transparent` / `currentColor` 放行），且 token 引用数 ≥ 60（实测 **77**）。这条把「不许硬编码颜色」变成可执行判据。
+- 改写 `tests/client-render.spec.mjs`（**8/8 → 16/16**）：除原有地址 / 隧道 / 别名 / curl 覆盖外，新增布局类存在性、五块磁贴读真实计数、缺计数时显示 `—` 与 `stat.noData` 而不是 0、搜索框可访问名、最近请求表两种结果与 `37k → 149` 缩写、空态、状态点 `is-on` / `is-bad` 类、首帧（状态为 `null`）仍能渲染。
+- 回归合计 **56/56**（4 + 13 + 14 + 7 + 1 + 16 + 1 样式守卫计入前者），`npm test` 串联全部。
+
+### Notes
+
+- **生效方式不同**：`client.js` 由宿主的 `client-hmr` 每 500ms `statSync` 轮询 mtime/ctime/size，变化即 `rebuilt()` 重新发布 rev 并经 `/plugins/events` SSE 通知浏览器重载 —— **刷新页面即可看到新界面**。`index.js`（宿主半）是进程内代码，`usageTotals` / `bytes` 必须**重启 DSH** 才会出现在状态文档里；重启前页面会诚实地显示 `—` + `stat.noData`，不会假装是 0。
+- 页面外观的验收只能由人看（亮色与暗色两种主题）；`client-render.spec.mjs` 明确只是**结构 / 崩溃回归**，不作为视觉验收依据，也不生成模拟渲染截图。
+
+## 1.2.0 (2026-11-06)
+
+### Added
+
+- **模型别名（`aliases`）** —— 外部客户端发什么名字由它自己决定，别名把那些名字接到真实的 `provider/model` 上。实测背景：Cursor 自定义 Base URL 只发它写死的模型名，`gpt-4o` 原样转发得到 `404 model gpt-4o is not registered`；而 `deepseek-v4.1-flash`、`gpt-5.6-sol` 这类裸 ID 在真实 profile 里同时被 2–3 个 provider 提供（150 个模型 / 62 个唯一裸 ID / 37 个撞名），原样转发得到 `400 … exists on several providers (trae, trae-global, workbuddy) …`。
+  - 解析顺序：`provider/model` → **别名** → 不撞名的裸 ID。别名先于目录解析，所以它**能压过撞名裸 ID**。
+  - 别名会出现在 `/v1/models`（带 `alias_of`），`/v1/models/<别名>` 也返回 `alias_of`；响应里的 `model` 回显调用方发来的名字。
+  - 目标必须是 `provider/model`；没有 provider 前缀的目标在配置里被丢弃、在写接口里被 400 拒绝 —— 不留必然 404 的别名。
+  - 持久化进 `settings.json` 的 `aliases`；页面「模型别名」卡片可增删保存，`POST /plugins/dsh-openai-gateway/aliases` 整体替换。
+- **对外地址（`publicBaseUrl`）** —— 页面同时显示**对外地址**与**本机地址**，curl 示例用对外地址。配置合法 URL 时优先于隧道地址与回环地址；不合法（非 http/https）时忽略。
+- **插件自己拉起隧道（`tunnel`）** —— `tunnel: { provider: "ngrok" | "cloudflared", autostart: true }`，或用页面「隧道」卡片的启动/停止按钮（`POST /plugins/dsh-openai-gateway/tunnel`）。
+  - 插件 `spawn` 子进程、从它自己的输出里读出公网 URL、写进状态文档与页面；`ctx.effect` 的清理函数 `kill` 掉子进程，实测退出后无残留 ngrok 进程。
+  - URL 解析按**主机名**匹配（`https://<id>.ngrok-free.dev` / `https://<id>.trycloudflare.com`），因此 `--log-format json` 的 `"url":"…"`、文本日志的 `url=…`、默认人类可读日志的 `Forwarding  …` 三种格式都能识别。
+  - 网关**仍然只绑 `127.0.0.1`** —— 隧道连的是回环地址，不需要改成 `0.0.0.0`；对外只公开 `/v1`。
+- **`apply()` 返回实例状态** —— 便于测试（与宿主调试）读取实际绑定的端口、密钥与隧道状态，而不是靠猜端口。
+
+### Tests
+
+- 新增 `tests/alias.spec.mjs`（**14/14**）：别名解析与上游真实 ID、目录广告、`/v1/models/<别名>`、未知模型仍 404、`settings.json` 落盘与重启读回（含密钥复用）、别名压过撞名裸 ID、无别名时撞名仍 400、`provider/model` 显式寻址、畸形别名被丢弃、`publicBaseUrl` 生效与非法值忽略、未配置隧道与非法 provider 的降级。
+- 新增 `tests/client-render.spec.mjs`（**8/8**）：用最小假 `react` 渲染整个页面组件，覆盖对外/本机地址并列显示、隧道卡片（运行中 / 失败原因 / 停止态）、别名表首帧即由状态文档驱动、curl 示例用对外地址。这一项是为了让「页面能渲染」变成可执行判据，而不是靠截图看。
+- 改写 `tests/tunnel-live.spec.mjs`（需 `DSH_GW_TUNNEL=1`，用真实二进制、消耗账号额度，故不进入 `npm test`）：从「拉起了 ngrok」升级为**经公网 URL 取 `/v1/models` 的端到端验收**，并新增「不带密钥返回 401」；`DSH_GW_TUNNEL_PROVIDER=cloudflared` 可换用 cloudflared 快速隧道，避免与正在运行的 ngrok 抢同一个 dev domain。实测 cloudflared 路径 `5/5 checks passed`。
+- 回归合计 **39/39**（4 + 13 + 14 + 8）。
+
+### Notes
+
+- ngrok free 账号只有一个 dev domain：同域第二个连接会被 `ERR_NGROK_334` 拒绝。实测中一个残留的 ngrok 进程（占着 4040 与同一 dev domain）正是首次 live 测试失败的原因；插件把它报成 `failed` 并在页面显示原因，而不是静默。
+- **`ERR_NGROK_3200` = endpoint offline**：dev domain 属于账号、跨重启地址不变，但**域名在线的前提是有一个 ngrok 进程正在跑**。不配 `autostart` 时隧道停在 `idle`、`baseUrl` 回落到回环地址，此时访问域名得到 3200 —— 不是域名失效，是隧道没开。
+- **`autostart` 已实测生效**：改完 profile 的 `cordis.patch.yml` 后插件重载并自行拉起 ngrok（子进程父进程为 `DeepSeek Harness.exe`，命令行 `ngrok http 8787 --log stdout --log-format json`），无需手动重启 DSH。
+- Cursor 侧的实测：经隧道 `GET /v1/models` 用 `UA=cursor/0.48.9` 返回 `200 models=150` 且无 ngrok 拦截页；无 UA / 浏览器 UA 会命中 `ERR_NGROK_6024` 拦截页 —— 这属于 ngrok free 的限制，不是网关行为。带 `Authorization` 头时不触发拦截。
+- 端到端实测（真实 profile、经隧道、`UA=cursor/0.48.9`）：`gpt-4o` 无别名时 `404 model_not_found`；加别名后 `200`、`model` 回显 `gpt-4o`、`content=TUNNEL_ALIAS_OK`；流式 `200 frames=107 hasDONE=true hasUsage=true assembled="12345"`。别名目标写错时 trace 会明确报 `UNKNOWN_MODEL` / `pi-ai provider "…" has no configured model "…"`，而不是伪装成路由失败。
+
 ## 1.1.0 (2026-10-24)
 
 ### Added

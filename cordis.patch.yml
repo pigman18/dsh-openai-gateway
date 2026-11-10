@@ -8,6 +8,11 @@
 #   apiKey         — pin a key instead of the stored one
 #   bodyLimitBytes — request body cap
 #   catalogTtlMs   — /v1/models cache lifetime
+#   publicBaseUrl  — the address external clients should use, e.g.
+#                    https://name.ngrok-free.dev/v1 (wins over the loopback one)
+#   tunnel         — { provider: ngrok | cloudflared, autostart: true } to let
+#                    the plugin supervise a tunnel process itself
+#   aliases        — { "gpt-4o": "provider/model" } names a client may send
 - insert:
     - id: dsh-openai-gateway
       name: dsh-openai-gateway
