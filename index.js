@@ -81,7 +81,6 @@ const SETTINGS_ROUTE = `/plugins/${PLUGIN_ID}/settings`
 const KEY_ROUTE = `/plugins/${PLUGIN_ID}/key`
 const ALIAS_ROUTE = `/plugins/${PLUGIN_ID}/aliases`
 const TUNNEL_ROUTE = `/plugins/${PLUGIN_ID}/tunnel`
-const AUTHTOKEN_ROUTE = `/plugins/${PLUGIN_ID}/authtoken`
 /** Tunnel providers the plugin can supervise itself. */
 const TUNNEL_PROVIDERS = new Set(['ngrok', 'cloudflared'])
 /** How long a spawned tunnel may take to publish its public URL. */
@@ -96,22 +95,6 @@ const TUNNEL_URL_PATTERNS = {
   ngrok: /https:\/\/[a-z0-9-]+\.ngrok-free\.(?:dev|app)/g,
   cloudflared: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/g,
 }
-/**
- * Where a human gets an ngrok authtoken. Signing up is an interactive flow
- * (email verification, or an OAuth grant to Google/GitHub) that ngrok exposes
- * no API for, so the plugin can only open the right page and take the token
- * back — never create the account itself.
- */
-const NGROK_SIGNUP_URL = 'https://dashboard.ngrok.com/signup'
-const NGROK_TOKEN_URL = 'https://dashboard.ngrok.com/get-started/your-authtoken'
-/**
- * ngrok authtokens are long base64url-ish strings. Validating the shape here
- * keeps a mistyped paste from being written into the user's ngrok config,
- * where it would silently break every later `ngrok` invocation.
- */
-const NGROK_TOKEN_PATTERN = /^[A-Za-z0-9_-]{20,}$/
-/** How long `ngrok config add-authtoken` may take before it is reported. */
-const AUTHTOKEN_WRITE_TIMEOUT_MS = 15_000
 
 /** Cordis plugin name, surfaced in diagnostics. */
 export const name = PLUGIN_ID
@@ -227,17 +210,6 @@ export function apply(ctx, config) {
       pid: undefined,
       startedAt: undefined,
     },
-    // Whether an ngrok authtoken is on this machine. Read at startup so the
-    // page can offer the guided setup instead of a tunnel that fails with
-    // "authentication failed". Never holds the token itself.
-    authtoken: {
-      configured: hasNgrokAuthtoken(),
-      at: undefined,
-      file: undefined,
-      // Empty means "resolve the agent's own config"; a test points it at a
-      // sandbox so no real token can be touched.
-      configFile: '',
-    },
   }
 
   // One dispatcher shared by the listener; `route` is a hoisted declaration.
@@ -319,13 +291,6 @@ export function apply(ctx, config) {
         path: TUNNEL_ROUTE,
         handler: (req, res) => {
           control(ctx, req, res, () => applyTunnel(ctx, state, req, res, bodyLimit))
-        },
-      }),
-      webServer.register({
-        kind: 'exact',
-        path: AUTHTOKEN_ROUTE,
-        handler: (req, res) => {
-          control(ctx, req, res, () => applyAuthtoken(ctx, state, req, res, bodyLimit))
         },
       }),
     ]
@@ -2224,171 +2189,6 @@ function tunnelPayload(state) {
   }
 }
 
-/* ------------------------------------------------------------- authtoken */
-
-/**
- * Where the ngrok agent keeps its config.
- *
- * The agent moved this from `~/.ngrok2` to a platform directory, and honours
- * `NGROK_CONFIG` when *reading*. `config add-authtoken` is different: it ignores
- * that variable, which is why callers pass the result of this function as
- * `--config` instead of relying on the agent's own default.
- */
-function ngrokConfigPath() {
-  if (typeof process.env.NGROK_CONFIG === 'string' && process.env.NGROK_CONFIG !== '') {
-    return process.env.NGROK_CONFIG
-  }
-  if (process.platform === 'win32') {
-    const base = process.env.LOCALAPPDATA
-    return base === undefined ? join(homedir(), '.ngrok2', 'ngrok.yml') : join(base, 'ngrok', 'ngrok.yml')
-  }
-  return join(process.env.XDG_CONFIG_HOME ?? join(homedir(), '.config'), 'ngrok', 'ngrok.yml')
-}
-
-/**
- * Is an ngrok authtoken already configured on this machine?
- *
- * Checks every location the agent might have used, because a token the user
- * added with the CLI must count even if this plugin never saw it. The token
- * value is never read out — only whether the key is present.
- */
-function hasNgrokAuthtoken() {
-  const candidates = [
-    process.env.NGROK_CONFIG,
-    ngrokConfigPath(),
-    join(homedir(), '.ngrok2', 'ngrok.yml'),
-  ].filter((entry) => typeof entry === 'string' && entry !== '')
-  for (const file of candidates) {
-    try {
-      if (!existsSync(file)) continue
-      if (/^\s*authtoken\s*:\s*\S/m.test(readFileSync(file, 'utf8'))) return true
-    } catch {
-      // An unreadable config is not evidence of a token; keep looking.
-    }
-  }
-  return false
-}
-
-/**
- * `{ token }` from the page: run `ngrok config add-authtoken` so the user does
- * not have to leave the dashboard to paste it into a terminal.
- *
- * Signing up for an ngrok account is deliberately not automated: it needs email
- * verification or an OAuth grant, and a plugin that could mint accounts in bulk
- * would only be useful for dodging the one-free-domain limit. The plugin
- * therefore opens the signup page and accepts the token the user copies back.
- */
-async function applyAuthtoken(ctx, state, req, res, bodyLimit) {
-  let body
-  try {
-    body = await readBody(req, bodyLimit)
-  } catch (error) {
-    sendJson(res, 400, { error: messageOf(error) })
-    return
-  }
-  const token = typeof body.token === 'string' ? body.token.trim() : ''
-  if (!NGROK_TOKEN_PATTERN.test(token)) {
-    sendJson(res, 400, {
-      error: 'token-invalid',
-      message: 'that does not look like an ngrok authtoken (expected 20+ characters, no spaces)',
-    })
-    return
-  }
-
-  // The target file is configurable so a test can point it at a sandbox; the
-  // shipped default is the agent's own config, resolved rather than guessed.
-  const configFile =
-    typeof state.authtoken.configFile === 'string' && state.authtoken.configFile !== ''
-      ? state.authtoken.configFile
-      : ngrokConfigPath()
-  const outcome = await runAuthtoken(ctx, token, configFile)
-  if (!outcome.ok) {
-    sendJson(res, 502, { error: 'authtoken-write-failed', message: outcome.message })
-    return
-  }
-
-  // Mutate the record rather than replacing it: `configFile` lives here too, and
-  // a wholesale assignment would silently drop it back to the agent default on
-  // the next call — which is how a sandboxed write escaped to the real config.
-  state.authtoken.configured = true
-  state.authtoken.at = Date.now()
-  state.authtoken.file = outcome.file
-  logInfo(ctx, 'ngrok authtoken saved')
-
-  // A tunnel that failed for want of a token can now come up unattended.
-  if (state.tunnel.status === 'failed' || state.tunnel.status === 'unconfigured') {
-    state.tunnelConfig.provider = 'ngrok'
-    state.tunnel.error = undefined
-    startTunnel(ctx, state)
-  }
-  sendJson(res, 200, { ok: true, file: outcome.file, tunnel: tunnelPayload(state).tunnel })
-}
-
-/**
- * Run `ngrok config add-authtoken` and report what it said.
- *
- * `--config` is always passed explicitly. `add-authtoken` ignores the
- * `NGROK_CONFIG` environment variable and falls back to the platform default,
- * so leaving it off means "write to whatever config this user happens to have"
- * — which is both untestable without touching a real token and impossible to
- * point at a sandbox. Naming the file makes the target explicit and auditable.
- */
-function runAuthtoken(ctx, token, configFile) {
-  return new Promise((done) => {
-    const args = ['config', 'add-authtoken', token]
-    if (typeof configFile === 'string' && configFile !== '') args.push('--config', configFile)
-    let child
-    try {
-      child = spawn('ngrok', args, {
-        windowsHide: true,
-        stdio: ['ignore', 'pipe', 'pipe'],
-      })
-    } catch (error) {
-      done({ ok: false, message: `could not run ngrok: ${messageOf(error)}` })
-      return
-    }
-
-    let output = ''
-    let settled = false
-    const finish = (result) => {
-      if (settled) return
-      settled = true
-      clearTimeout(timer)
-      done(result)
-    }
-
-    const timer = setTimeout(() => {
-      try {
-        child.kill()
-      } catch {}
-      finish({ ok: false, message: `ngrok config did not finish within ${AUTHTOKEN_WRITE_TIMEOUT_MS / 1000}s` })
-    }, AUTHTOKEN_WRITE_TIMEOUT_MS)
-    timer.unref?.()
-
-    // ngrok prints the config path it wrote. Capturing it lets the page show
-    // where the token went without asking the user to find the file.
-    child.stdout?.on('data', (chunk) => {
-      output += String(chunk)
-    })
-    child.stderr?.on('data', (chunk) => {
-      output += String(chunk)
-    })
-    child.on('error', (error) => {
-      finish({ ok: false, message: `could not run ngrok: ${messageOf(error)}` })
-    })
-    child.on('exit', (code) => {
-      if (code !== 0) {
-        const detail = output.trim().split('\n').slice(-3).join(' ').slice(0, 300)
-        logWarn(ctx, `ngrok config add-authtoken exited ${code}`)
-        finish({ ok: false, message: detail === '' ? `ngrok exited with code ${code}` : detail })
-        return
-      }
-      const match = output.match(/([A-Za-z]:\\[^\r\n]*?ngrok\.ya?ml|\/[^\s\r\n]*?ngrok\.ya?ml)/)
-      finish({ ok: true, file: match === null ? undefined : match[1] })
-    })
-  })
-}
-
 /* --------------------------------------------------------------- status */
 
 /**
@@ -2472,15 +2272,6 @@ async function statusPayload(ctx, state, ttl, refresh) {
       name: typeof provider.name === 'string' ? provider.name : provider.id,
       models: counts.get(provider.id) ?? 0,
     })),
-    // Whether an ngrok token is present, so the page can offer the guided
-    // setup rather than letting the tunnel fail with "authentication failed".
-    // The token itself is never included.
-    authtoken: {
-      configured: state.authtoken.configured,
-      at: state.authtoken.at ?? null,
-      signupUrl: NGROK_SIGNUP_URL,
-      tokenUrl: NGROK_TOKEN_URL,
-    },
     requests: state.requests,
     failures: state.failures,
     // Totals for this process only, accumulated in `recordRequest`. Not

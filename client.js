@@ -30,7 +30,6 @@ window.__ModuleLoader__.load({
 		const KEY_PATH = "/plugins/dsh-openai-gateway/key";
 		const ALIAS_PATH = "/plugins/dsh-openai-gateway/aliases";
 		const TUNNEL_PATH = "/plugins/dsh-openai-gateway/tunnel";
-		const AUTHTOKEN_PATH = "/plugins/dsh-openai-gateway/authtoken";
 		const STYLE_ATTR = "data-dsh-openai-gateway";
 		//#endregion
 
@@ -86,22 +85,6 @@ window.__ModuleLoader__.load({
 			"page.tunnelStop": "停止",
 			"page.tunnelHint": "由插件自己拉起隧道进程，退出 DSH 时一并关闭。也可以在外面手动开隧道，再把地址填进配置。",
 			"page.tunnelProvider": "方式",
-			"page.setup": "ngrok 账号",
-			"page.setupReady": "已配置",
-			"page.setupMissing": "未配置",
-			"page.setupHint": "ngrok 需要先有一个账号，隧道才能拿到固定域名。注册与取 token 在浏览器里完成，插件不能代你注册。",
-			"page.setupStep1": "1. 打开注册页，用邮箱或 Google / GitHub 登录",
-			"page.setupStep2": "2. 复制页面上的 authtoken",
-			"page.setupStep3": "3. 粘到下面，保存后立即生效",
-			"page.setupOpenSignup": "打开注册页",
-			"page.setupOpenToken": "打开 token 页",
-			"page.setupPlaceholder": "粘贴 ngrok authtoken",
-			"page.setupSave": "保存 token",
-			"page.setupSaving": "保存中…",
-			"page.setupSaved": "token 已写入 ngrok 配置",
-			"page.setupBad": "保存失败，请检查 token 是否正确",
-			"page.setupInvalid": "这不像一个 ngrok authtoken（至少 20 个字符、不含空格）",
-			"page.setupFile": "写入位置",
 			"page.alias": "模型别名",
 			"page.aliasHint": "给外部客户端用的短名字，映射到 provider/model。Cursor 发 gpt-4o 这类名字时靠它路由；撞名的模型必须走别名。",
 			"page.aliasName": "别名",
@@ -190,22 +173,6 @@ window.__ModuleLoader__.load({
 			"page.tunnelStop": "Stop",
 			"page.tunnelHint": "The plugin runs the tunnel process itself and closes it with DSH. You can also run one outside and put its hostname in the config.",
 			"page.tunnelProvider": "Provider",
-			"page.setup": "ngrok account",
-			"page.setupReady": "Configured",
-			"page.setupMissing": "Not configured",
-			"page.setupHint": "ngrok needs an account before a tunnel can claim a stable domain. Signing up and copying the token happen in a browser; the plugin cannot create the account for you.",
-			"page.setupStep1": "1. Open the signup page and log in with email, Google or GitHub",
-			"page.setupStep2": "2. Copy the authtoken shown there",
-			"page.setupStep3": "3. Paste it below — saving applies it immediately",
-			"page.setupOpenSignup": "Open signup",
-			"page.setupOpenToken": "Open token page",
-			"page.setupPlaceholder": "Paste the ngrok authtoken",
-			"page.setupSave": "Save token",
-			"page.setupSaving": "Saving…",
-			"page.setupSaved": "The token was written to the ngrok config",
-			"page.setupBad": "Could not save it — check that the token is correct",
-			"page.setupInvalid": "That does not look like an ngrok authtoken (20+ characters, no spaces)",
-			"page.setupFile": "Written to",
 			"page.alias": "Model aliases",
 			"page.aliasHint": "Short names an external client may send, mapped to provider/model. Cursor sends its own ids such as gpt-4o; colliding bare ids need an alias.",
 			"page.aliasName": "Alias",
@@ -368,14 +335,6 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-value { display: flex; align-items: center; gap: var(--gw-s2); min-width: 0; }
 [${STYLE_ATTR}] .gw-note { margin-top: var(--gw-s2); color: var(--dsw-alias-label-tertiary); font-size: 11px; }
 [${STYLE_ATTR}] .gw-note + .gw-label { margin-top: var(--gw-s3); }
-/* The three setup steps read as one block, so the numbers line up and the
-   list does not borrow the page's default indent. */
-[${STYLE_ATTR}] .gw-steps {
-	margin: var(--gw-s2) 0 0; padding: 0; list-style: none;
-	display: grid; gap: 3px;
-	color: var(--dsw-alias-label-secondary); font-size: 11px;
-}
-[${STYLE_ATTR}] .gw-steps li { padding-left: 0; }
 
 /* ---- code and input ---- */
 [${STYLE_ATTR}] .gw-code {
@@ -398,9 +357,6 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-input::placeholder { color: var(--dsw-alias-label-caption); }
 [${STYLE_ATTR}] .gw-input:focus-visible { outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color); outline-offset: 1px; }
 [${STYLE_ATTR}] .gw-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-/* The token field shares the .gw-value row with its buttons, so it takes the
-   remaining width instead of sizing to its placeholder. */
-[${STYLE_ATTR}] .gw-value .gw-input { flex: 1 1 auto; }
 [${STYLE_ATTR}] .gw-port-row {
 	display: flex; align-items: center; gap: var(--gw-s2);
 	margin-top: var(--gw-s3); padding-top: var(--gw-s3);
@@ -671,11 +627,6 @@ window.__ModuleLoader__.load({
 			// removes a row, so a refresh never clobbers an in-progress edit.
 			const [aliasDraftRows, setAliasDraftRows] = useState(null);
 			const [busyTunnel, setBusyTunnel] = useState(false);
-			// The guided ngrok setup. The token lives only in this input and in the
-			// POST body: it is never read back from the host, never kept in state
-			// after saving, and never rendered anywhere else on the page.
-			const [tokenDraft, setTokenDraft] = useState("");
-			const [busyToken, setBusyToken] = useState(false);
 			const [query, setQuery] = useState("");
 			// Providers start expanded; the set records the ones the user closed.
 			// Storing the exception keeps the default right when the catalogue
@@ -875,54 +826,6 @@ window.__ModuleLoader__.load({
 				[load, t],
 			);
 
-			/**
-			 * Hand the pasted authtoken to the host, which runs
-			 * `ngrok config add-authtoken`. The token is dropped from this
-			 * component's state the moment the request settles, whichever way it
-			 * went, so it cannot linger in a screenshot or a re-render.
-			 */
-			const saveToken = useCallback(async () => {
-				const token = tokenDraft.trim();
-				if (!/^[A-Za-z0-9_-]{20,}$/.test(token)) {
-					setNotice({ scope: "setup", kind: "bad", text: t("page.setupInvalid") });
-					return;
-				}
-				setBusyToken(true);
-				try {
-					const response = await fetch(AUTHTOKEN_PATH, {
-						method: "POST",
-						cache: "no-store",
-						credentials: "same-origin",
-						headers: { Accept: "application/json", "Content-Type": "application/json" },
-						body: JSON.stringify({ token }),
-					});
-					const payload = await response.json().catch(() => ({}));
-					if (!response.ok) {
-						setNotice({
-							scope: "setup",
-							kind: "bad",
-							text:
-								payload.error === "token-invalid"
-									? t("page.setupInvalid")
-									: typeof payload.message === "string" && payload.message !== ""
-										? payload.message
-										: t("page.setupBad"),
-						});
-						return;
-					}
-					setTokenDraft("");
-					setNotice({ scope: "setup", kind: "good", text: t("page.setupSaved") });
-					// The host starts the tunnel itself once a token is present, so the
-					// URL may still be connecting on this pass.
-					await load();
-					setTimeout(() => load(), 4000);
-				} catch {
-					setNotice({ scope: "setup", kind: "bad", text: t("page.setupBad") });
-				} finally {
-					setBusyToken(false);
-				}
-			}, [tokenDraft, load, t]);
-
 			const toggleGroup = useCallback((provider) => {
 				setClosedGroups((previous) => {
 					const next = new Set(previous);
@@ -977,13 +880,6 @@ window.__ModuleLoader__.load({
 			const baseUrl = status?.baseUrl ?? "";
 			const localUrl = status?.localBaseUrl ?? "";
 			const tunnel = status?.tunnel ?? null;
-			// The host reports whether an ngrok token exists and where the two
-			// pages live; it never reports the token itself.
-			const setupReady = status?.authtoken?.configured === true;
-			const setupLinks = {
-				signup: status?.authtoken?.signupUrl ?? "https://dashboard.ngrok.com/signup",
-				token: status?.authtoken?.tokenUrl ?? "https://dashboard.ngrok.com/get-started/your-authtoken",
-			};
 			const tunnelStatus = typeof tunnel?.status === "string" ? tunnel.status : "unconfigured";
 			const tunnelLabel =
 				tunnelStatus === "running"
@@ -1152,95 +1048,6 @@ window.__ModuleLoader__.load({
 							),
 							h("div", { className: "gw-note" }, t("page.portHint")),
 							noticeFor("port"),
-						),
-						h(
-							"section",
-							{ className: "gw-card", key: "setup" },
-							h(
-								"div",
-								{ className: "gw-label" },
-								h("span", { className: "gw-label-title" }, t("page.setup")),
-								h(
-									"span",
-									{ className: "gw-label-side" },
-									h(
-										"span",
-										{
-											className: "gw-hint-inline",
-											style: {
-												color: setupReady
-													? "var(--dsw-alias-state-success-primary)"
-													: "var(--dsw-alias-state-idle-primary)",
-											},
-										},
-										setupReady ? t("page.setupReady") : t("page.setupMissing"),
-									),
-									h(
-										"a",
-										{
-											className: "gw-btn is-quiet",
-											href: setupLinks.signup,
-											target: "_blank",
-											rel: "noreferrer noopener",
-										},
-										t("page.setupOpenSignup"),
-									),
-								),
-							),
-							h("div", { className: "gw-note" }, t("page.setupHint")),
-							h(
-								"ol",
-								{ className: "gw-steps" },
-								h("li", null, t("page.setupStep1")),
-								h("li", null, t("page.setupStep2")),
-								h("li", null, t("page.setupStep3")),
-							),
-							h(
-								"div",
-								{ className: "gw-value" },
-								h("input", {
-									className: "gw-input",
-									type: "password",
-									autoComplete: "off",
-									spellCheck: false,
-									placeholder: t("page.setupPlaceholder"),
-									value: tokenDraft,
-									disabled: busyToken,
-									onChange: (event) => setTokenDraft(event.target.value),
-									onKeyDown: (event) => {
-										if (event.key === "Enter" && !busyToken) saveToken();
-									},
-								}),
-								h(
-									"button",
-									{
-										type: "button",
-										className: "gw-btn",
-										disabled: busyToken || tokenDraft.trim() === "",
-										onClick: () => saveToken(),
-									},
-									busyToken ? t("page.setupSaving") : t("page.setupSave"),
-								),
-								h(
-									"a",
-									{
-										className: "gw-btn is-quiet",
-										href: setupLinks.token,
-										target: "_blank",
-										rel: "noreferrer noopener",
-									},
-									t("page.setupOpenToken"),
-								),
-							),
-							typeof status?.authtoken?.file === "string" && status.authtoken.file !== ""
-								? h(
-										"div",
-										{ className: "gw-note" },
-										`${t("page.setupFile")}: `,
-										h("code", { className: "gw-code" }, status.authtoken.file),
-									)
-								: null,
-							noticeFor("setup"),
 						),
 						h(
 							"section",
