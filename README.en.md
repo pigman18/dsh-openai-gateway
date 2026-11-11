@@ -129,7 +129,8 @@ Name the provider in the bundle config, or press **Start** on the page's **Tunne
 
 - The plugin spawns `ngrok http <port>` / `cloudflared tunnel --url http://127.0.0.1:<port>`, reads the public URL out of its own output, and reports it in the status document and on the page.
 - When DSH exits (or the plugin is unloaded) the child is killed, so no orphan is left holding the dev domain.
-- `ngrok` needs `ngrok config add-authtoken <token>` beforehand. A `cloudflared` quick tunnel (`--url`) needs no login, but its hostname changes on every start — use ngrok's free dev domain if you need a stable one.
+- `ngrok` needs an authtoken. A `cloudflared` quick tunnel (`--url`) needs no login, but its hostname changes on every start — use ngrok's free dev domain if you need a stable one.
+- **You can paste the token straight into the page.** The "ngrok account" card at the top of the dashboard shows whether a token is configured and links to both the signup and token pages. Signing up stays manual, in a browser: it needs email verification or an OAuth grant and ngrok exposes no account-creation API. Paste the token into the field and save — the plugin runs `ngrok config add-authtoken --config <path>` and starts the tunnel if it is not already running. `ngrok config add-authtoken <token>` on the command line is equivalent.
 - **`autostart: true` is what keeps the hostname reachable.** ngrok's dev domain belongs to your account and survives restarts, but it is only online while an ngrok process is running. Without `autostart` the tunnel sits at `idle`, `baseUrl` falls back to loopback, and visiting the domain returns `ERR_NGROK_3200` (endpoint offline) — that is not a dead domain, it is a tunnel that was never started.
 
 **B. Run a tunnel yourself and set the address**
@@ -197,6 +198,7 @@ You can also add and remove them on the page's **Model aliases** card (written b
 | `POST` | `/plugins/dsh-openai-gateway/key` | `{"action":"regenerate"}` — mint a new key |
 | `POST` | `/plugins/dsh-openai-gateway/aliases` | `{"aliases":{"gpt-4o":"provider/model"}}` — replace the whole table; `{}` clears it |
 | `POST` | `/plugins/dsh-openai-gateway/tunnel` | `{"action":"start"}` / `{"action":"stop"}` — run or stop the tunnel the plugin supervises |
+| `POST` | `/plugins/dsh-openai-gateway/authtoken` | `{"token":"<ngrok authtoken>"}` — write it to the ngrok config. A malformed token returns 400 `token-invalid`; a failed write returns 502 `authtoken-write-failed`. The token is never echoed back, never stored in `settings.json`, and never appears in the status document |
 
 Requests are authorised with `Authorization: Bearer <key>`, compared in constant time.
 

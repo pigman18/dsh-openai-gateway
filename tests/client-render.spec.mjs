@@ -110,6 +110,13 @@ const STATUS = {
   listenError: null,
   apiKey: 'sk-dsh-o-rllIuMuh2gPlOdm_DUc3bFj_X2S71W',
   settingsFile: 'C:\\Users\\Administrator\\.dsh\\openai-gateway\\settings.json',
+  authtoken: {
+    configured: false,
+    at: undefined,
+    file: undefined,
+    signupUrl: 'https://dashboard.ngrok.com/signup',
+    tokenUrl: 'https://dashboard.ngrok.com/get-started/your-authtoken',
+  },
   modelCount: 2,
   models: [
     { id: 'provider-a/only-a', provider: 'provider-a' },
@@ -205,6 +212,46 @@ function classes(node, out = new Set()) {
   }
   for (const child of node.children ?? []) classes(child, out)
   return out
+}
+
+/** Every `href` in the tree, so a check can assert a link points where it should. */
+function links(node, out = []) {
+  if (node === null || node === undefined || typeof node === 'boolean') return out
+  if (typeof node !== 'object') return out
+  if (Array.isArray(node)) {
+    for (const child of node) links(child, out)
+    return out
+  }
+  const href = node.props?.href
+  if (typeof href === 'string') out.push(href)
+  for (const child of node.children ?? []) links(child, out)
+  return out
+}
+
+/** First node satisfying the predicate, or undefined. */
+function findBy(node, predicate) {
+  if (node === null || node === undefined || typeof node !== 'object') return undefined
+  if (Array.isArray(node)) {
+    for (const child of node) {
+      const hit = findBy(child, predicate)
+      if (hit !== undefined) return hit
+    }
+    return undefined
+  }
+  if (predicate(node)) return node
+  for (const child of node.children ?? []) {
+    const hit = findBy(child, predicate)
+    if (hit !== undefined) return hit
+  }
+  return undefined
+}
+
+/** First node carrying the given class, or undefined. */
+function findByClass(node, name) {
+  return findBy(node, (candidate) => {
+    const className = candidate.props?.className
+    return typeof className === 'string' && className.split(/\s+/).includes(name)
+  })
 }
 
 const texts = collect(rendered)
@@ -384,6 +431,40 @@ await check('the first frame renders while the status document is still null', (
   const loadingTexts = collect(loadingTree)
   assert.ok(loadingTexts.includes('page.loading'), 'the loading state must render before the first read')
   assert.ok(loadingTexts.includes('page.models'), 'the catalogue card should exist before data arrives')
+})
+
+await check('the guided setup offers both ngrok pages and a token field', () => {
+  const tree = render(STATUS)
+  const texts = collect(tree)
+  assert.ok(texts.includes('page.setup'), 'the setup card is missing')
+  assert.ok(texts.includes('page.setupStep1'), 'the setup steps are missing')
+  assert.ok(texts.includes('page.setupSave'), 'there is no way to submit a token')
+  const hrefs = links(tree)
+  assert.ok(hrefs.includes('https://dashboard.ngrok.com/signup'), 'no link to the signup page')
+  assert.ok(
+    hrefs.includes('https://dashboard.ngrok.com/get-started/your-authtoken'),
+    'no link to the token page',
+  )
+  // The port field is also a .gw-input, so locate the token field by its type.
+  const field = findBy(tree, (node) => node.props?.type === 'password')
+  assert.ok(field !== undefined, 'the token input is missing')
+  assert.ok(
+    String(field.props?.className ?? '').split(/\s+/).includes('gw-input'),
+    'the token field should use the shared input style',
+  )
+})
+
+await check('the setup card reflects whether a token is already configured', () => {
+  const missing = collect(render(STATUS))
+  assert.ok(missing.includes('page.setupMissing'), 'a missing token should be reported as such')
+  const ready = collect(render({ ...STATUS, authtoken: { ...STATUS.authtoken, configured: true } }))
+  assert.ok(ready.includes('page.setupReady'), 'a saved token should be reported as configured')
+})
+
+await check('the token is never present in the rendered page', () => {
+  const secret = 'spec_secret_token_should_never_render_0123456789'
+  const tree = render({ ...STATUS, authtoken: { ...STATUS.authtoken, configured: true, file: 'C:\\x\\ngrok.yml' } })
+  assert.ok(!collect(tree).join(' ').includes(secret), 'a token value leaked into the markup')
 })
 
 const failed = results.filter((entry) => !entry.ok)

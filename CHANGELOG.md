@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.4.0 (2026-11-11)
+
+### Added
+
+- **页面内的 ngrok 账号引导**。以前隧道失败只会甩一句「authentication failed」，用户得自己猜要去哪儿注册、token 又该粘到哪。现在仪表盘多了一张「ngrok 账号」卡片：
+  - 显示当前是否已配置 token（读 `status.authtoken.configured`，只报告**有没有**，绝不读值）。
+  - 两个外链直达注册页与 token 页 —— 注册这一步必须在浏览器里人工完成（邮箱验证或 OAuth 授权，ngrok 没有开账号的 API），插件不代注册。
+  - 一个 `type="password"` 输入框 + 保存按钮，回车即可提交；保存成功后清空输入框、提示写入位置，并在隧道处于 `failed` / `unconfigured` 时**自动把 provider 切到 ngrok 并拉起隧道**。
+  - 新增控制路由 `POST /plugins/dsh-openai-gateway/authtoken`，沿用既有 `control()` 守卫（仅 POST、仅 loopback origin、仅 `application/json`）。token 形状不合法回 400 `token-invalid`，ngrok 写入失败回 502 `authtoken-write-failed`。
+  - `status` 新增 `authtoken: { configured, at, file, signupUrl, tokenUrl }`。**token 本身既不进状态文档、不进 `settings.json`、也不回显在响应里** —— ngrok 已经持有它，再存一份只是多一个泄漏面。
+
+### Fixed
+
+- **`ngrok config add-authtoken` 现在显式传 `--config`**。该子命令**不读** `NGROK_CONFIG` 环境变量，会直接落到平台默认路径；不指定就等于「写到这台机器碰巧有的那个配置」，既无法在沙箱里测试，也无法指定目标。现在由 `ngrokConfigPath()` 解析出路径并显式传入。
+- **`applyAuthtoken` 不再整体替换 `state.authtoken`**。原实现写的是 `state.authtoken = { configured, at, file }`，把同一对象里的 `configFile` 一并抹掉，导致第一次写入走沙箱、第二次悄悄回落到真实配置 —— 这正是测试期间污染真实 `ngrok.yml` 的原因。改为逐字段赋值。
+
+### Tests
+
+- 新增 `tests/authtoken.spec.mjs`（**11/11**）：真实 `index.js` + 真实 `ngrok` 二进制，用 `--config` 指向沙箱。覆盖「状态文档给出两个外链」「状态文档绝不含 token 值」「非 token 形状被 400 拒绝（含空串 / 空白 / 19 字符 / 含空格）」「畸形 body 被拒」「跨源 POST 被 403 拒绝」「好 token 写进被指定的沙箱文件」「回执报告写入路径」「回执不回显 token」「写入后 `configured` 变 true 且带时间戳」。
+- 该文件还带两条**守卫**，正是为了拦住上面那个 bug：`用户自己的 ngrok.yml 在测试前后字节完全一致`、`沙箱之外没有任何配置文件收到测试 token`。这两条在修复前确实是红的，修复后转绿。
+- `tests/client-render.spec.mjs`（**16/16 → 19/19**）：新增「引导卡片给出两个 ngrok 外链与 password 输入框」「已配置 / 未配置两种状态文案」「token 值绝不出现在渲染结果里」。
+
+### Notes
+
+- **不自动注册 ngrok 账号**，这是有意为之的边界：注册需要邮箱验证或 OAuth 授权，ngrok 没有提供开账号的接口；而一个能批量造账号的插件，唯一用途就是绕开「每个账号一个免费域名」的限制，那属于滥用。
+- 零账号的替代方案仍然是 cloudflared quick tunnel（`TUNNEL_PROVIDERS` 已支持），每次启动随机一个 `*.trycloudflare.com` 域名。
+
 ## 1.3.0 (2026-11-06)
 
 ### Changed

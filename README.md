@@ -129,7 +129,8 @@ Cursor 的自定义 Base URL 不接受 `localhost` / `127.0.0.1`，必须是一�
 
 - 插件 `spawn` 出 `ngrok http <端口>` / `cloudflared tunnel --url http://127.0.0.1:<端口>`，从它自己的输出里读出公网 URL，写进状态文档与页面。
 - 退出 DSH（或插件被卸载）时子进程一并结束，不会留下一个占着 dev domain 的孤儿进程。
-- ngrok 需要事先 `ngrok config add-authtoken <token>`；`cloudflared` 的快速隧道（`--url`）不需要登录，但每次启动的域名会变 —— 要稳定域名请用 ngrok 的 free dev domain。
+- ngrok 需要一个 authtoken；`cloudflared` 的快速隧道（`--url`）不需要登录，但每次启动的域名会变 —— 要稳定域名请用 ngrok 的 free dev domain。
+- **token 可以直接在页面里填**：仪表盘顶部的「ngrok 账号」卡片显示当前是否已配置，并给出注册页与 token 页的直达链接。注册必须在浏览器里人工完成（邮箱验证或 OAuth 授权，ngrok 没有开账号的接口），插件不代注册；把 token 粘进输入框点保存即可，插件会调用 `ngrok config add-authtoken --config <路径>` 写入，并在隧道未运行时自动拉起。也可以继续用命令行 `ngrok config add-authtoken <token>`，两条路等价。
 - **`autostart: true` 是让域名一直可用的前提**：ngrok 的 dev domain 属于你的账号、跨重启不变，但**域名在线的前提是有一个 ngrok 进程正在跑**。不配 `autostart` 时隧道停在 `idle`，`baseUrl` 回落到回环地址，此时访问那个域名会得到 `ERR_NGROK_3200`（endpoint offline）——这不是域名失效，是隧道没开。
 
 **B. 自己在外面开隧道，把地址填进来**
@@ -197,6 +198,7 @@ Cursor 的自定义 Base URL 不接受 `localhost` / `127.0.0.1`，必须是一�
 | `POST` | `/plugins/dsh-openai-gateway/key` | `{"action":"regenerate"}` 换密钥 |
 | `POST` | `/plugins/dsh-openai-gateway/aliases` | `{"aliases":{"gpt-4o":"provider/model"}}` 整体替换别名表，`{}` 清空 |
 | `POST` | `/plugins/dsh-openai-gateway/tunnel` | `{"action":"start"}` / `{"action":"stop"}` 启停插件拉起的隧道进程 |
+| `POST` | `/plugins/dsh-openai-gateway/authtoken` | `{"token":"<ngrok authtoken>"}` 写入 ngrok 配置；形状不合法回 400 `token-invalid`，写入失败回 502 `authtoken-write-failed`。token 不回显、不进 `settings.json`、不进状态文档 |
 
 鉴权为 `Authorization: Bearer <key>`，比较使用常量时间比较。
 
