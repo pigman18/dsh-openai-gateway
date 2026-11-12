@@ -1,4 +1,6 @@
 node_modules/
 *.log
+# Scratch space for the headless-Chrome UI previews (see .proto/render-live.mjs).
+.proto/
 .DS_Store
 Thumbs.db

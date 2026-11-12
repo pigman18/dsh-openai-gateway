@@ -62,14 +62,29 @@ const KEEPALIVE_MS = 15_000
 /** How many finished requests the status document keeps for diagnosis. */
 const RECENT_LIMIT = 20
 /**
- * How long a failing alias target sits out before it is tried again.
+ * How a route's targets are rotated.
  *
- * Nothing probes it in the meantime: a target earns its way back by being the
- * next one a real request needs. Five minutes is long enough that a spent daily
- * quota does not cost one failed round-trip per request, and short enough that
- * a transient throttle heals without a restart.
+ * There is no cooldown clock any more. A route keeps one cursor: the target the
+ * next request should start at. A request walks the chain from that cursor, one
+ * lap at most, and the cursor then moves to the target after the one that
+ * served. A spent quota therefore costs one round-trip per lap instead of one
+ * per request for five minutes, and a target comes back the moment its turn
+ * comes round again — no timer decides anything.
+ *
+ * A single request never goes round twice: once the walk returns to the target
+ * it started at, every target has had its turn and the request fails.
  */
-const FAILOVER_COOLDOWN_MS = 5 * 60_000
+const ROTATION_MAX_LAPS = 1
+/**
+ * How long a target's last failure keeps it marked on the page.
+ *
+ * Long enough that a route which skips a dead head shows the reason while the
+ * user is looking at it, short enough that a target which has since recovered
+ * (or was fixed) stops shouting without needing a restart. A live fault is
+ * refreshed by the next lap that reaches it, so this only ever expires marks
+ * nobody is re-confirming.
+ */
+const TARGET_FAULT_TTL_MS = 10 * 60_000
 /**
  * Failures that mean "this target cannot serve right now, another one might":
  * quota, throttling, timeouts, upstream faults and unreachable hosts.
@@ -104,6 +119,15 @@ const FAILOVER_CODES = new Set([
   'NO_ADAPTER',
 ])
 /**
+ * Model ids/names that look vision-capable, used to reorder a route when the
+ * request carries images. Deliberately broad: putting a text model first costs
+ * one wasted round-trip (the placeholder answer), while putting nothing first
+ * guarantees the omission reply the caller cannot act on. Matched against the
+ * catalogued id and display name, case-insensitively.
+ */
+const VISION_MODEL_PATTERN =
+  /(?:gemini|gpt-?[456]|gpt-?[456].?-(?:luna|sol|terra|astra)|o[34]|claude|glm-?[456]?v|qwen-?vl|vlm|vision|doubao.*vision|seed.*1\.[68]|kimi-?k[23].*vision|pixtral|llama.*vision|internvl)/i
+/**
  * Failures that are about the target's account or quota, recognised from the
  * text an adapter puts on them rather than from `code`.
  *
@@ -121,6 +145,24 @@ const FAILOVER_CODES = new Set([
  */
 const QUOTA_ERROR_PATTERN =
   /(?:GoUsageLimitError|FreeUsageLimitError|usage limit reached|usage limit exceeded|quota exceeded|insufficient_quota|available balance|out of budget|insufficient balance|billing|payment required|rate limit|too many requests)/i
+/**
+ * Failures that mean the target itself is not wired up: no credential for its
+ * provider, a credential that the adapter cannot read, a base URL that is gone.
+ *
+ * These are the target's problem in the strictest sense — every other target is
+ * unaffected by it, and nothing the caller sends can change the outcome. The
+ * host reports them with whatever code the adapter picked (`PI_AI_ERROR` from
+ * the pi-ai adapter, usually with no `status`), so they used to fall through
+ * every failover test and end the route: one target listed without an
+ * `apiKeyEnv` made a nine-target route answer 502 "No API key for provider:
+ * opencode-zen" while eight healthy targets sat behind it untouched.
+ *
+ * Walking past such a target costs one round-trip and is the only way the route
+ * can keep serving. It is not a licence to walk the list on every error — the
+ * pattern is deliberately narrow and names the concrete misconfigurations.
+ */
+const TARGET_CONFIG_ERROR_PATTERN =
+  /(?:no api key for provider|no api key (?:configured|set|found)|missing api key|api key (?:is )?not (?:configured|set)|no credentials? (?:for|configured)|invalid api key for provider|provider .* has no api key)/i
 /** Statuses that describe the target, not the caller's payload. */
 const FAILOVER_STATUSES = new Set([402, 408, 425, 429, 500, 502, 503, 504, 529])
 const KEY_PREFIX = 'sk-dsh-'
@@ -238,7 +280,8 @@ export function apply(ctx, config) {
 
   const state = {
     store,
-    apiKey: store.apiKey,
+    apiKey: primaryKey(store),
+    keys: store.keys,
     settingsFile: store.path,
     enabled,
     startedAt: Date.now(),
@@ -278,10 +321,14 @@ export function apply(ctx, config) {
     // sets it to run a stand-in script instead, which is the only substitution
     // that works on Windows (see the comment in startTunnel).
     tunnelCommand: undefined,
-    // Which alias targets are sitting out, and why. In memory only: a restart
-    // is exactly when a spent quota may have reset.
-    failover: new Map(),
-    failoverReason: new Map(),
+    // Where each route starts on its next request, and what made it move. In
+    // memory only: a restart is exactly when a spent quota may have reset.
+    rotation: new Map(),
+    rotationReason: new Map(),
+    // Targets that refused the last request sent to them, with the adapter's
+    // own words. Cleared the moment that target serves again: this answers
+    // "which one is actually broken right now", not "has it ever failed".
+    targetFaults: new Map(),
     tunnel: {
       status: 'idle',
       provider: tunnelConfig.provider ?? null,
@@ -434,7 +481,7 @@ export function apply(ctx, config) {
       return
     }
 
-    if (!authorize(req, state.apiKey)) {
+    if (!authorize(req, state.store.keys)) {
       sendError(res, 401, 'authentication_error', 'invalid API key', { code: 'invalid_api_key' })
       return
     }
@@ -615,9 +662,10 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
   trace.messages = call.io.messages.length
   trace.roles = call.io.messages.map((message) => message.role).join(',')
   trace.inputTokensEst = estimateInputTokens(call)
+  trace.images = requestHasImages(body)
   call.trace = trace
 
-  await dispatchWithFailover(ctx, state, res, call, route, requested, trace, controller.signal)
+  await dispatchWithFailover(ctx, state, res, call, route, requested, trace, controller.signal, body)
   } catch (error) {
     trace.outcome = 'error'
     trace.code = error?.code
@@ -631,57 +679,56 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
   }
 }
 
-/* ------------------------------------------------------------ failover */
+/* ------------------------------------------------------------ rotation */
 
 /**
  * Send one request to the best target the alias allows, moving on when a
  * target reports that it cannot serve right now.
  *
- * The candidate list is the alias's own order, minus anything cooling down.
- * When every target is cooling down the list is not empty: the least-recently
- * failed one is used anyway. An alias whose whole list is benched still has to
- * answer something, and a caller would rather get a real 402 from the best
- * candidate than a synthetic "everything is cooling down" that no client knows
- * how to read.
+ * The order is the route's own order, started at the route's cursor rather
+ * than always at the first target. The cursor is what replaces the old
+ * cooldown clock: a target that just failed is not skipped for a fixed five
+ * minutes, it is simply the next one in line, so a spent quota costs one
+ * round-trip per lap instead of one per request until the timer expires.
+ *
+ * One request walks at most one full lap. If it comes back round to the target
+ * it started at, every target has had its turn and the request fails with the
+ * last failure — a request never spins on a chain where nothing can serve.
  *
  * Failover is only possible before the response commits. Once a stream has sent
  * its first delta the answer is partly delivered, so replaying it on another
  * target would either duplicate it or silently swap the model mid-answer; that
  * failure is reported instead.
  */
-async function dispatchWithFailover(ctx, state, res, call, route, requested, trace, signal) {
+async function dispatchWithFailover(ctx, state, res, call, route, requested, trace, signal, body) {
   const targets = aliasPlan(state, requested)
   const candidates = []
+  let ordered
+  let base
 
   if (targets === undefined) {
     candidates.push({ provider: route.provider, model: route.model })
   } else {
-    for (const target of targets) {
+    // A request with images is reordered toward targets the catalogue says can
+    // see them, so the first try is not one that will answer with an omission
+    // placeholder. The reorder is applied to the route's *membership* order and
+    // then rotated, so vision-capable targets stay ahead of the rest while the
+    // cursor still moves the lap along.
+    base = visionOrderedTargets(targets, state.catalog.entries, body) ?? targets
+    const start = rotationStart(state, requested, base)
+    ordered = [...base.slice(start), ...base.slice(0, start)]
+    for (const target of ordered) {
       const cut = target.indexOf('/')
       if (cut <= 0) continue
       const provider = target.slice(0, cut)
       const model = target.slice(cut + 1)
       if (model.length === 0) continue
-      if (!targetUsable(state, target)) continue
       candidates.push({ provider, model, target })
     }
-    if (candidates.length === 0) {
-      // Everything is benched: use the one whose cooldown expires first, so a
-      // spent quota still produces a real upstream answer for the caller.
-      let soonest
-      let soonestUntil = Number.POSITIVE_INFINITY
-      for (const target of targets) {
-        const until = state.failover.get(target) ?? 0
-        if (until < soonestUntil) {
-          soonestUntil = until
-          soonest = target
-        }
-      }
-      const cut = String(soonest).indexOf('/')
-      if (cut > 0) {
-        candidates.push({ provider: soonest.slice(0, cut), model: soonest.slice(cut + 1), target: soonest })
-      }
-    }
+    // At most one lap: the walk may not visit a target twice, so a chain of
+    // dead targets fails once instead of looping.
+    const lap = Math.min(candidates.length, Math.max(1, candidates.length * ROTATION_MAX_LAPS))
+    candidates.length = lap
   }
 
   trace.attempts = 0
@@ -692,7 +739,7 @@ async function dispatchWithFailover(ctx, state, res, call, route, requested, tra
     if (signal.aborted) break
     // Every candidate gets its own config, including the first. `call` was
     // translated against whatever `resolveRoute` picked, and that may well be a
-    // target whose cooldown is still running — so the candidate's own
+    // different target than the cursor starts at — so the candidate's own
     // provider/model has to win in every case, not just from the second one on.
     const attemptCall = {
       ...call,
@@ -709,17 +756,43 @@ async function dispatchWithFailover(ctx, state, res, call, route, requested, tra
       : await blockingCompletion(ctx, state, res, attemptCall, signal)
 
     if (outcome?.ok === true) {
-      if (candidate.target !== undefined) state.failover.delete(candidate.target)
+      // The target that served stays the start: a working target keeps serving
+      // until it stops working. Only a failure moves the cursor.
+      //
+      // The attempts before this one already wrote their failure onto the trace,
+      // and this request did end up answered — so the record has to say so.
+      // Without this a request that walked past three dead targets and then
+      // succeeded showed up in "recent" as a failure carrying the first dead
+      // target's error, which is the opposite of what happened. A committed
+      // stream is the exception: it answered, but its own error stands.
+      if (outcome.committed !== true) {
+        trace.outcome = 'ok'
+        trace.code = undefined
+        trace.message = undefined
+      }
+      // Serving is proof the target works, so any fault it carried is spent.
+      clearTargetFault(state, candidate.target)
       return outcome
     }
 
     lastFailure = outcome?.failure
-    if (candidate.target !== undefined && failoverEligible(lastFailure, { committed: outcome?.committed === true }) !== undefined) {
-      coolDown(state, candidate.target, lastFailure)
-    }
+    // Whatever happens next, this target refused this request and the page
+    // should be able to say so. A target the walk steps over carries the same
+    // mark as one that ended it — the difference is `failover`, not visibility.
+    recordTargetFault(state, candidate.target, lastFailure)
     // A committed stream has already answered; nothing left to try.
     if (outcome?.committed === true) return outcome
-    if (failoverEligible(lastFailure, { committed: false }) === undefined) break
+    if (failoverEligible(lastFailure, { committed: false }) === undefined) {
+      // Not every failure is another target's opportunity: an invalid request
+      // would fail everywhere, so the route stops here.
+      break
+    }
+    // Move past the target that just refused, so the *next* request starts one
+    // further along instead of paying for this refusal again. Wrapping happens
+    // here, at the end of the chain, which is what makes a dead head cost one
+    // failure rather than one per request. A direct route has no chain to
+    // rotate, so only an alias owns a cursor.
+    if (base !== undefined) advanceRotation(state, requested, base, candidate.target, lastFailure)
     if (index < candidates.length - 1) {
       logInfo(
         ctx,
@@ -879,6 +952,68 @@ function translateTools(body) {
     })
   }
   return tools
+}
+
+/**
+ * Whether the request carries visual input the target model must actually see.
+ *
+ * Only user-authored parts count: a base64 data URL or a http(s) image. The
+ * placeholder text a text-only route substitutes (`[image omitted …]`) is what
+ * the model reads when this check is skipped, and a model that cannot see the
+ * attachment answers "I cannot open files" — the misleading reply this routing
+ * exists to prevent.
+ */
+function requestHasImages(body) {
+  for (const raw of Array.isArray(body.messages) ? body.messages : []) {
+    if (raw?.role !== 'user' || !Array.isArray(raw.content)) continue
+    for (const part of raw.content) {
+      if (part === null || typeof part !== 'object') continue
+      const type = typeof part.type === 'string' ? part.type : ''
+      if (type === 'image_url' || type === 'input_image' || (type === 'image' && !part.attachment)) return true
+    }
+  }
+  return false
+}
+
+/**
+ * The target list for a request with images, or `undefined` to keep the
+ * caller's own order.
+ *
+ * A text-only target does not fail when it is handed an image — it quietly
+ * answers with the omission placeholder, which reads like the model refusing.
+ * When the request has images, targets known from the live catalogue to accept
+ * them move to the front, so the first try is one that can actually see them.
+ * Targets the catalogue does not mention keep their relative order behind the
+ * known-vision ones: heuristics can be wrong, and the caller's order is still
+ * the best guess for everything unproven.
+ */
+function visionOrderedTargets(targets, entries, body) {
+  if (!requestHasImages(body) || !Array.isArray(targets) || targets.length === 0) return undefined
+  const vision = new Set(
+    entries
+      .filter((entry) => modelAcceptsImages(entry))
+      .map((entry) => modelKey(entry)),
+  )
+  if (vision.size === 0) return undefined
+  const known = targets.filter((target) => vision.has(target))
+  // A route whose every target is already vision-capable needs no reorder.
+  if (known.length === 0 || known.length === targets.length) return undefined
+  return [...known, ...targets.filter((target) => !vision.has(target))]
+}
+
+/**
+ * Whether a catalogue entry's model accepts image input.
+ *
+ * The catalogue does not carry a capability flag, so this reads the same public
+ * naming the providers use in `/v1/models`: gemini, gpt-4o/5/6 variants,
+ * claude, glm-4v/5v, qwen-vl, doubao-vision and the like. A model that is
+ * vision-capable but oddly named can be forced with `visionTargets` on the
+ * route, which wins over this guess.
+ */
+function modelAcceptsImages(entry) {
+  const id = String(entry?.model?.id ?? '').toLowerCase()
+  const name = String(entry?.model?.name ?? '').toLowerCase()
+  return VISION_MODEL_PATTERN.test(id) || VISION_MODEL_PATTERN.test(name)
 }
 
 function translateStop(value) {
@@ -1221,29 +1356,113 @@ function normalizeAliases(input) {
 /**
  * Whether a target can be tried right now.
  *
- * Cooldowns live in memory only: a restart is exactly when a spent quota may
- * have been reset, so persisting "this one is bad" would outlive the fact that
- * made it true.
+ * Rotation state lives in memory only: a restart is exactly when a spent quota
+ * may have been reset, so persisting "start at target 3" would outlive the fact
+ * that made it true.
  */
-function targetUsable(state, target) {
-  const until = state.failover.get(target)
-  if (until === undefined) return true
-  if (Date.now() >= until) {
-    state.failover.delete(target)
-    return true
-  }
-  return false
+function rotationStart(state, alias, targets) {
+  const target = state.rotation.get(alias)
+  if (target === undefined) return 0
+  const index = targets.indexOf(target)
+  return index < 0 ? 0 : index
 }
 
-/** Record that a target just failed in a way another target might survive. */
-function coolDown(state, target, failure) {
-  state.failover.set(target, Date.now() + FAILOVER_COOLDOWN_MS)
-  state.failoverReason.set(target, {
+/** Record where the next request on this route should start. */
+function advanceRotation(state, alias, targets, servedTarget, failure) {
+  const index = targets.indexOf(servedTarget)
+  const next = index < 0 ? 0 : (index + 1) % targets.length
+  state.rotation.set(alias, targets[next])
+  state.rotationReason.set(alias, {
     code: failure?.code,
     message: messageOf(failure),
     at: Date.now(),
-    until: Date.now() + FAILOVER_COOLDOWN_MS,
+    movedFrom: servedTarget,
   })
+}
+
+/**
+ * Remember that one target just refused, and why.
+ *
+ * The rotation cursor already says *where* the next request starts, but not
+ * *why* it moved — and a route whose first hop is a provider with no
+ * credential looks perfectly healthy from a cursor alone: the page shows a
+ * tidy chain and a blue "primary" badge on the broken row. Keeping the last
+ * failure per target is what lets the page mark the hop itself.
+ *
+ * Only a target that was actually tried gets an entry, and serving clears it,
+ * so this is a statement about the present rather than a scar that never
+ * heals.
+ */
+function recordTargetFault(state, target, failure) {
+  if (typeof target !== 'string' || target.length === 0) return
+  const code = typeof failure?.code === 'string' ? failure.code : undefined
+  const status = Number.isFinite(failure?.status) ? failure.status : undefined
+  const message = messageOf(failure)
+  // A caller-cancelled attempt says nothing about the target.
+  if (code === 'ABORTED' || message.length === 0) return
+  state.targetFaults.set(target, {
+    code,
+    status,
+    message,
+    at: Date.now(),
+    // Whether another target could take over: the same test the dispatcher
+    // uses to decide to keep walking. A fault that stops the walk is a much
+    // louder problem for this route than one it steps over.
+    failover: failoverEligible(failure, { committed: false }) !== undefined,
+  })
+}
+
+/** A target that just served is not faulty any more. */
+function clearTargetFault(state, target) {
+  if (typeof target !== 'string') return
+  state.targetFaults.delete(target)
+}
+
+/**
+ * Per-target health as the page needs it: the faults themselves, plus a
+ * one-line reason short enough for a badge title.
+ *
+ * Entries expire: a target that refused once and has not been tried since is
+ * not evidence of anything current, and a badge that never clears is one the
+ * user learns to ignore. Rotation wraps back to every target, so a real fault
+ * is refreshed by the next lap long before this window closes.
+ */
+function targetFaultsState(state) {
+  const faults = {}
+  const now = Date.now()
+  for (const [target, fault] of state.targetFaults) {
+    if (now - fault.at > TARGET_FAULT_TTL_MS) {
+      state.targetFaults.delete(target)
+      continue
+    }
+    faults[target] = {
+      code: fault.code,
+      status: fault.status,
+      message: fault.message,
+      at: fault.at,
+      failover: fault.failover,
+      reason: faultReason(fault),
+    }
+  }
+  return faults
+}
+
+/**
+ * The shortest honest description of a fault, for a tooltip and a badge.
+ *
+ * Adapter messages are frequently a whole JSON body prefixed by an HTTP status
+ * (`502 No API key for provider: opencode-zen (01a1…)`), which is unreadable in
+ * a 12px row. This keeps the first sentence and drops the trailing request id
+ * noise; the raw message still travels beside it for anyone who needs it.
+ */
+function faultReason(fault) {
+  const raw = fault.message
+    .replace(/\s*\([0-9a-f]{8,}(?:-[0-9a-f-]{8,})?\)\s*$/i, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  const cut = raw.search(/[.;]\s/)
+  const head = cut > 0 ? raw.slice(0, cut) : raw
+  return head.length > 160 ? `${head.slice(0, 157)}…` : head
 }
 
 /**
@@ -1257,14 +1476,19 @@ function coolDown(state, target, failure) {
  * `code` was too narrow: an adapter that surfaces a bare upstream 429 — as the
  * OpenCode free-tier limit does, with no `code` at all — was treated as
  * unrecoverable, so the route stopped at the spent target instead of handing
- * the request to the next one.
+ * the request to the next one. The same gap hid a target whose provider has no
+ * credential: the pi-ai adapter answers `PI_AI_ERROR` "No API key for provider:
+ * …" with no status, which no code test and no quota test recognised, so a
+ * nine-target route answered 502 on the first target without trying the rest.
  */
 function failoverEligible(failure, { committed }) {
   if (committed) return undefined
   if (failure === undefined || failure === null) return undefined
   if (typeof failure.code === 'string' && FAILOVER_CODES.has(failure.code)) return failure
   if (typeof failure.status === 'number' && FAILOVER_STATUSES.has(failure.status)) return failure
-  if (QUOTA_ERROR_PATTERN.test(messageOf(failure))) return failure
+  const message = messageOf(failure)
+  if (QUOTA_ERROR_PATTERN.test(message)) return failure
+  if (TARGET_CONFIG_ERROR_PATTERN.test(message)) return failure
   return undefined
 }
 
@@ -2056,6 +2280,10 @@ function clampPort(value) {
  * legacy `api-key` file so an already-configured client keeps working.
  * `portOverride` (an explicit bundle config port) wins over the stored one.
  * Persistence failures are not fatal: the values still apply to this process.
+ *
+ * Keys are a list. A store written by an older build carries a single
+ * `apiKey` string; it is adopted as the first entry rather than rewritten on
+ * sight, so a downgrade still finds a key it understands.
  */
 function loadStore(ctx, { portOverride, apiKeyPinned, aliases }) {
   const dir = join(dshHome(), KEY_DIRNAME)
@@ -2068,12 +2296,19 @@ function loadStore(ctx, { portOverride, apiKeyPinned, aliases }) {
     /* first run, or an unreadable file: rebuilt below */
   }
 
-  const apiKey =
-    apiKeyPinned.length >= MIN_KEY_LENGTH
-      ? apiKeyPinned
-      : typeof stored.apiKey === 'string' && stored.apiKey.trim().length >= MIN_KEY_LENGTH
-        ? stored.apiKey.trim()
-        : legacyApiKey(dir) ?? mintKey()
+  const keys = normalizeKeys(stored.keys)
+  if (keys.length === 0) {
+    // A pinned key from the bundle config is authoritative on a fresh profile;
+    // otherwise the legacy single key, then the legacy `api-key` file, then a
+    // minted one — the same precedence the single-key build used.
+    const adopted =
+      apiKeyPinned.length >= MIN_KEY_LENGTH
+        ? apiKeyPinned
+        : typeof stored.apiKey === 'string' && stored.apiKey.trim().length >= MIN_KEY_LENGTH
+          ? stored.apiKey.trim()
+          : legacyApiKey(dir)
+    keys.push(newKey(adopted ?? mintKey()))
+  }
 
   const port =
     portOverride !== undefined
@@ -2101,9 +2336,48 @@ function loadStore(ctx, { portOverride, apiKeyPinned, aliases }) {
       : aliases !== undefined && Object.keys(aliases).length > 0
         ? aliases
         : {}
-  const store = { path, dir, port, apiKey, aliases: aliasTable, persisted: false }
+  const store = { path, dir, port, keys, aliases: aliasTable, persisted: false }
   saveStore(ctx, store)
   return store
+}
+
+/**
+ * The key list, sanitized. Anything without usable key material is dropped:
+ * a half-written entry must not become a key that authenticates nothing.
+ */
+function normalizeKeys(input) {
+  if (!Array.isArray(input)) return []
+  const keys = []
+  const seen = new Set()
+  for (const raw of input) {
+    if (raw === null || typeof raw !== 'object') continue
+    const value = typeof raw.key === 'string' ? raw.key.trim() : ''
+    if (value.length < MIN_KEY_LENGTH) continue
+    if (seen.has(value)) continue
+    seen.add(value)
+    keys.push({
+      id: typeof raw.id === 'string' && raw.id.length > 0 ? raw.id : keyId(),
+      key: value,
+      label: typeof raw.label === 'string' ? raw.label.trim() : '',
+      createdAt: Number.isFinite(raw.createdAt) ? raw.createdAt : Date.now(),
+    })
+  }
+  return keys
+}
+
+/** A fresh entry, so every key in the list has the same shape. */
+function newKey(value, label = '') {
+  return { id: keyId(), key: value, label, createdAt: Date.now() }
+}
+
+/** Short, stable, non-secret: the id is what the page addresses a key by. */
+function keyId() {
+  return randomBytes(4).toString('hex')
+}
+
+/** The key a caller should see as "the" one: the first entry, for old clients. */
+function primaryKey(store) {
+  return store.keys[0]?.key
 }
 
 function legacyApiKey(dir) {
@@ -2122,7 +2396,14 @@ function mintKey() {
 function saveStore(ctx, store) {
   try {
     mkdirSync(store.dir, { recursive: true })
-    const body = { port: store.port, apiKey: store.apiKey }
+    // `apiKey` is still written: it is the first entry, so a build that only
+    // knows the single-key format keeps authenticating. `keys` is the real
+    // source of truth from this version on.
+    const body = {
+      port: store.port,
+      apiKey: primaryKey(store),
+      keys: store.keys.map((entry) => ({ ...entry })),
+    }
     // Only persisted when non-empty: an empty table would otherwise erase a
     // profile's YAML aliases on the next boot.
     if (Object.keys(store.aliases ?? {}).length > 0) body.aliases = store.aliases
@@ -2274,6 +2555,20 @@ async function applyPort(ctx, state, req, res, bodyLimit) {
   sendJson(res, 200, { port: state.listenPort, baseUrl: baseUrlOf(state), fallback: false })
 }
 
+/**
+ * Key management on the settings route.
+ *
+ * One action per call, because each one changes what authenticates and the
+ * page should not have to guess which of several edits won:
+ *
+ *   {"action":"regenerate"}             replace the first key
+ *   {"action":"add","label":"laptop"}   append a key
+ *   {"action":"remove","id":"…"}        drop one (the last one is kept)
+ *   {"action":"rename","id":"…","label":"…"}
+ *
+ * Removing or regenerating takes effect on the next request: `authorize` reads
+ * the list on every call, so no client keeps working past its key's removal.
+ */
 async function rotateKey(ctx, state, req, res, bodyLimit) {
   let body
   try {
@@ -2282,14 +2577,48 @@ async function rotateKey(ctx, state, req, res, bodyLimit) {
     sendJson(res, 400, { error: messageOf(error) })
     return
   }
-  if (body.action !== 'regenerate') {
-    sendJson(res, 400, { error: 'unknown-action', message: 'expected {"action":"regenerate"}' })
+
+  const action = typeof body.action === 'string' ? body.action : ''
+  if (action === 'regenerate') {
+    // Regenerating replaces the first key rather than the whole list: the other
+    // keys are clients that were deliberately given their own, and a rotate
+    // must not silently lock them out.
+    const first = state.store.keys[0]
+    const replacement = newKey(mintKey(), first?.label ?? '')
+    state.store.keys = [replacement, ...state.store.keys.slice(1)]
+  } else if (action === 'add') {
+    const label = typeof body.label === 'string' ? body.label.trim() : ''
+    state.store.keys.push(newKey(mintKey(), label))
+  } else if (action === 'remove') {
+    const id = typeof body.id === 'string' ? body.id : ''
+    if (state.store.keys.length <= 1) {
+      sendJson(res, 400, { error: 'last-key', message: 'at least one key must remain' })
+      return
+    }
+    const kept = state.store.keys.filter((entry) => entry.id !== id)
+    if (kept.length === state.store.keys.length) {
+      sendJson(res, 404, { error: 'key-not-found' })
+      return
+    }
+    state.store.keys = kept
+  } else if (action === 'rename') {
+    const id = typeof body.id === 'string' ? body.id : ''
+    const target = state.store.keys.find((entry) => entry.id === id)
+    if (target === undefined) {
+      sendJson(res, 404, { error: 'key-not-found' })
+      return
+    }
+    target.label = typeof body.label === 'string' ? body.label.trim() : ''
+  } else {
+    sendJson(res, 400, {
+      error: 'unknown-action',
+      message: 'expected {"action":"regenerate"|"add"|"remove"|"rename"}',
+    })
     return
   }
-  state.store.apiKey = mintKey()
-  state.apiKey = state.store.apiKey
+
   saveStore(ctx, state.store)
-  sendJson(res, 200, { apiKey: state.apiKey })
+  sendJson(res, 200, { apiKey: primaryKey(state.store), keys: state.store.keys })
 }
 
 /** Replace the whole alias table. `{}` clears it. */
@@ -2356,14 +2685,24 @@ function resolveTunnelConfig(input) {
  * Start the configured tunnel as a child process and watch its output for the
  * public URL it prints. The child is owned by this plugin: it is killed on
  * dispose, so a reloaded profile does not leave an orphan holding the port.
+ *
+ * `requested` is the provider the caller just picked. It wins over the running
+ * tunnel's provider, which is what makes switching possible after a failure:
+ * a failed ngrok start used to leave `state.tunnel.provider` set, so picking
+ * cloudflared restarted ngrok and the picker looked broken.
  */
-function startTunnel(ctx, state) {
-  const provider = state.tunnel.provider ?? state.tunnelConfig.provider
+function startTunnel(ctx, state, requested) {
+  const provider = requested ?? state.tunnelConfig.provider
   if (provider === undefined) {
     state.tunnel.status = 'unconfigured'
     return
   }
-  if (state.tunnel.status === 'starting' || state.tunnel.status === 'running') return
+  if (state.tunnel.status === 'starting' || state.tunnel.status === 'running') {
+    // A switch while running is a restart, not a no-op: the caller asked for a
+    // different agent, so the old child has to go first.
+    if (provider === state.tunnel.provider) return
+    stopTunnel(ctx, state)
+  }
   const port = state.listenPort
   if (port === undefined) {
     state.tunnel.status = 'failed'
@@ -2395,7 +2734,7 @@ function startTunnel(ctx, state) {
     child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   } catch (error) {
     state.tunnel.status = 'failed'
-    state.tunnel.error = `could not run ${binary}: ${messageOf(error)}`
+    state.tunnel.error = explainTunnelSpawnError(provider, binary, error)
     return
   }
   state.tunnel.pid = child.pid
@@ -2450,7 +2789,7 @@ function startTunnel(ctx, state) {
   })
 
   child.on('error', (error) => {
-    finish('failed', `could not run ${binary}: ${messageOf(error)}`)
+    finish('failed', explainTunnelSpawnError(provider, binary, error))
     logWarn(ctx, `tunnel ${provider} failed: ${messageOf(error)}`)
   })
   child.on('exit', (code) => {
@@ -2465,6 +2804,28 @@ function startTunnel(ctx, state) {
   })
 
   state.tunnel.child = child
+}
+
+/**
+ * Why a tunnel agent could not even be started, in words the page can show.
+ *
+ * `spawn ENOENT` is the common case on Windows and it is not a bug in the
+ * gateway: the binary simply is not on PATH. Saying that, and naming the two
+ * ways to fix it, is the difference between "this plugin is broken" and "I
+ * need to install a tool". The raw `code` stays in the message so a support
+ * question still has the exact failure in it.
+ */
+function explainTunnelSpawnError(provider, binary, error) {
+  const code = error?.code
+  if (code === 'ENOENT') {
+    return (
+      `${binary} is not installed or not on PATH, so no tunnel could be started. ` +
+      (provider === 'ngrok'
+        ? `Install ngrok from ${NGROK_SIGNUP_URL}, run \`ngrok config add-authtoken <token>\` with the token from ${NGROK_TOKEN_URL}, then start it again — or switch to cloudflared below, which needs no account.`
+        : 'Install cloudflared and make sure its folder is on PATH, then start it again — or switch to ngrok below.')
+    )
+  }
+  return `could not run ${binary}: ${messageOf(error)}`
 }
 
 /**
@@ -2558,10 +2919,12 @@ async function applyTunnel(ctx, state, req, res, bodyLimit) {
     sendJson(res, 200, tunnelPayload(state))
     return
   }
-  if (typeof body.provider === 'string' && TUNNEL_PROVIDERS.has(body.provider.trim())) {
-    state.tunnelConfig.provider = body.provider.trim()
-  }
-  startTunnel(ctx, state)
+  const requested =
+    typeof body.provider === 'string' && TUNNEL_PROVIDERS.has(body.provider.trim())
+      ? body.provider.trim()
+      : undefined
+  if (requested !== undefined) state.tunnelConfig.provider = requested
+  startTunnel(ctx, state, requested)
   sendJson(res, 200, tunnelPayload(state))
 }
 
@@ -2652,7 +3015,11 @@ async function statusPayload(ctx, state, ttl, refresh) {
     preferredPort: state.store.port,
     portFallback: state.portFallback,
     listenError: state.listenError ?? null,
-    apiKey: state.apiKey,
+    apiKey: primaryKey(state.store),
+    // The whole list, with the key material included: the page is the only
+    // caller of this route, it already shows the first key, and a client that
+    // was handed the second one has no other way to read it back.
+    keys: state.store.keys.map((entry) => ({ ...entry })),
     settingsFile: state.store.persisted ? state.store.path : null,
     modelCount: entries.length,
     // The catalog travels with the status document: the page is same-origin
@@ -2663,10 +3030,13 @@ async function statusPayload(ctx, state, ttl, refresh) {
       ...(entry.model.name === entry.model.id ? {} : { name: entry.model.name }),
     })),
     aliases: aliasEntries(state, entries),
-    // Which targets are sitting out right now, and the reason each was benched.
-    // Derived from the in-memory cooldown map on every read, so the page never
-    // shows a target as unavailable after its cooldown has expired.
-    failover: failoverState(state),
+    // Where each route's rotation currently stands, and what last moved it.
+    // In-memory only, so it describes this process's routing, not a stored
+    // opinion about a target.
+    rotation: rotationState(state),
+    // Targets that refused their last request, so the page can mark the hop
+    // itself rather than only moving a cursor past it.
+    faults: targetFaultsState(state),
     tunnel: tunnelState(state),
     providers: ctx.llm.listProviders().map((provider) => ({
       id: provider.id,
@@ -2690,32 +3060,28 @@ async function statusPayload(ctx, state, ttl, refresh) {
 }
 
 /**
- * The live cooldown table, as the page needs it.
+ * Where each route's rotation currently stands, as the page needs it.
  *
- * Expired entries are dropped on read rather than on a timer: a target becomes
- * usable again the moment its cooldown passes, and nothing has to run in the
- * background to make that true.
+ * There is no clock to report: a route's cursor names the target the next
+ * request starts at, and that is the whole state. `reason` carries what moved
+ * the cursor last, so a route that keeps skipping a dead target is explainable
+ * from the dashboard instead of only from a log line.
  */
-function failoverState(state) {
-  const now = Date.now()
-  const cooling = []
-  for (const [target, until] of state.failover) {
-    if (now >= until) {
-      state.failover.delete(target)
-      state.failoverReason.delete(target)
-      continue
-    }
-    const reason = state.failoverReason.get(target)
-    cooling.push({
-      target,
-      until,
-      remainingMs: until - now,
+function rotationState(state) {
+  const routes = []
+  for (const [alias, next] of state.rotation) {
+    const reason = state.rotationReason.get(alias)
+    routes.push({
+      alias,
+      next,
       code: reason?.code,
       message: reason?.message,
+      at: reason?.at,
+      movedFrom: reason?.movedFrom,
     })
   }
-  cooling.sort((a, b) => a.until - b.until)
-  return { cooldownMs: FAILOVER_COOLDOWN_MS, cooling }
+  routes.sort((a, b) => (a.alias < b.alias ? -1 : a.alias > b.alias ? 1 : 0))
+  return { routes }
 }
 
 /* ----------------------------------------------------------- http utils */
@@ -2846,15 +3212,29 @@ function loopbackOrigin(req) {
   }
 }
 
-function authorize(req, apiKey) {
+/**
+ * Whether the presented bearer token is one of the gateway's keys.
+ *
+ * Every entry is compared, and no early exit is taken on the first mismatch
+ * inside a key: `timingSafeEqual` is per key, and the loop only stops at the
+ * key that matched. Comparing the presented token against each stored key in
+ * turn keeps the cost independent of which key (if any) is the right one.
+ */
+function authorize(req, keys) {
   const header = req.headers.authorization
   if (typeof header !== 'string') return false
   const match = /^Bearer\s+(.+)$/i.exec(header.trim())
   if (match === null) return false
   const presented = Buffer.from(match[1])
-  const expected = Buffer.from(apiKey)
-  if (presented.length !== expected.length) return false
-  return timingSafeEqual(presented, expected)
+  let ok = false
+  for (const entry of Array.isArray(keys) ? keys : []) {
+    const expected = Buffer.from(typeof entry === 'string' ? entry : entry?.key ?? '')
+    if (expected.length === 0) continue
+    // Same length is a precondition for `timingSafeEqual`; a wrong length is
+    // already a mismatch, so it cannot match and is skipped.
+    if (presented.length === expected.length && timingSafeEqual(presented, expected)) ok = true
+  }
+  return ok
 }
 
 function readBody(req, limit) {

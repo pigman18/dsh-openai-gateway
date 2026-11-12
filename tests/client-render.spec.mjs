@@ -30,7 +30,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const HOOKS = { status: null, slots: [], openEditor: null }
 
 /** The route editor's position in the page's `useState` call order. */
-const EDITOR_SLOT = 8
+const EDITOR_SLOT = 10
 
 const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() }),
@@ -47,10 +47,11 @@ const react = {
           ? initial()
           : initial
     // `HOOKS.openEditor` stands in for pressing a row's Edit button. The route
-    // editor is declared eighth (see the slot order in client.js: status,
-    // failed, copied, revealed, portDraft, notice, confirmKey, aliasDraftRows,
-    // editor). Matching on index rather than on "the first null" avoids being
-    // consumed by an earlier null slot such as `notice`.
+    // editor is declared eleventh (see the slot order in client.js: status,
+    // failed, copied, revealed, portDraft, notice, confirmKey, keyLabel,
+    // editingLabel, aliasDraftRows, editor). Matching on index rather than on
+    // "the first null" avoids being consumed by an earlier null slot such as
+    // `notice`.
     if (index === EDITOR_SLOT && HOOKS.openEditor !== null) value = HOOKS.openEditor
     HOOKS.slots.push(value)
     return [value, () => {}]
@@ -125,7 +126,7 @@ const STATUS = {
     { id: 'provider-b/shared-model', provider: 'provider-b' },
   ],
   aliases: [{ alias: 'gpt-4o', targets: ['provider-a/only-a'] }],
-  failover: { cooldownMs: 300000, cooling: [] },
+  rotation: { routes: [] },
   tunnel: {
     status: 'running',
     provider: 'ngrok',
@@ -391,7 +392,7 @@ await check('a multi-target alias renders every target, in try order', () => {
         ],
       },
     ],
-    failover: { cooldownMs: 300000, cooling: [] },
+    rotation: { routes: [] },
   })
   const rendered = collect(tree)
   assert.ok(rendered.includes('deepseek-flash'), 'the alias name is missing')
@@ -461,16 +462,38 @@ await check('a multi-target alias renders every target, in try order', () => {
   )
 })
 
-await check('a benched target is marked in the chain', () => {
+await check('a rotated route is marked in the chain', () => {
   const tree = render({
     ...STATUS,
     aliases: [{ alias: 'deepseek-flash', targets: ['a/one', 'b/two'] }],
-    failover: {
-      cooldownMs: 300000,
-      cooling: [{ target: 'a/one', code: 'QUOTA', message: 'quota spent', remainingMs: 240000, until: Date.now() + 240000 }],
+    rotation: {
+      routes: [
+        { alias: 'deepseek-flash', next: 'b/two', code: 'QUOTA', message: 'quota spent', at: Date.now(), movedFrom: 'a/one' },
+      ],
     },
   })
-  assert.ok(classes(tree).has('is-cooling'), 'no target was marked as cooling down')
+  assert.ok(classes(tree).has('is-cursor'), 'no target was marked as the rotation cursor')
+
+  /* The hop the cursor sits on carries the marker on its own number too. After
+     a failover the cursor is not hop 1, so colouring only hop 1 would point at
+     the wrong target — the blue index has to move with it. */
+  const marks = []
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child)
+      return
+    }
+    const cls = node.props?.className
+    if (typeof cls === 'string' && cls.split(' ').includes('gw-hop-idx')) marks.push(cls)
+    for (const child of node.children ?? []) walk(child)
+  }
+  walk(tree)
+  assert.deepEqual(
+    marks.map((cls) => cls.includes('is-cursor')),
+    [false, true],
+    `only the cursor hop's number should be highlighted: ${marks.join(' | ')}`,
+  )
 })
 
 await check('the model catalogue is searchable', () => {
@@ -553,24 +576,21 @@ await check('a stopped tunnel does not advertise a dead URL as primary', () => {
   assert.ok(stoppedTexts.includes('page.tunnelStart'), 'a stopped tunnel should offer Start')
 })
 
-await check('a cooling target shows its countdown on the routes tab', () => {
+await check('a rotated route shows where it now starts', () => {
   const tree = render({
     ...STATUS,
     aliases: [{ alias: 'deepseek-flash', targets: ['a/one', 'b/two'] }],
-    failover: {
-      cooldownMs: 300000,
-      cooling: [
-        { target: 'a/one', code: 'QUOTA', message: 'quota spent', remainingMs: 240000, until: Date.now() + 240000 },
+    rotation: {
+      routes: [
+        { alias: 'deepseek-flash', next: 'b/two', code: 'QUOTA', message: 'quota spent', at: Date.now(), movedFrom: 'a/one' },
       ],
     },
   })
   const rendered = collect(tree)
-  /* The strip on the overview names the count, and the hop shows the seconds. */
-  assert.ok(rendered.includes('cool.title'), 'the cooling strip is missing')
-  assert.ok(rendered.includes('240s'), `the countdown is missing; saw: ${rendered.filter((x) => /^\d+s$/.test(x)).join(', ')}`)
-  assert.ok(rendered.includes('page.aliasCooling'), 'the benched hop should say it is cooling')
-  /* The meter is the visual share of the cooldown still to run. */
-  assert.ok(classes(tree).has('gw-meter'), 'the cooldown meter is missing')
+  /* The strip on the overview names the route and its new start. */
+  assert.ok(rendered.includes('rot.title'), 'the rotation strip is missing')
+  assert.ok(rendered.includes('b/two'), 'the strip does not name where the route now starts')
+  assert.ok(rendered.includes('routes.cursor'), 'the hop the cursor sits on should say so')
 })
 
 await check('the routes tab badge counts the configured routes', () => {
@@ -580,7 +600,7 @@ await check('the routes tab badge counts the configured routes', () => {
       { alias: 'one', targets: ['a/one'] },
       { alias: 'two', targets: ['a/two', 'b/two'] },
     ],
-    failover: { cooldownMs: 300000, cooling: [] },
+    rotation: { routes: [] },
   })
   const badge = []
   const walk = (node) => {
@@ -772,7 +792,7 @@ await check('a stale target is labelled on the routes tab', () => {
     aliases: [
       { alias: 'flash', targets: ['gone/retired', 'provider-a/only-a'], unavailable: ['gone/retired'] },
     ],
-    failover: { cooldownMs: 300000, cooling: [] },
+    rotation: { routes: [] },
   })
   const text = collect(tree)
   assert.ok(text.includes('routes.unavailable'), 'the stale hop carries no unavailable label')
@@ -804,7 +824,7 @@ await check('a stale target is labelled inside the route editor too', () => {
       aliases: [
         { alias: 'flash', targets: ['gone/retired', 'provider-a/only-a'], unavailable: ['gone/retired'] },
       ],
-      failover: { cooldownMs: 300000, cooling: [] },
+      rotation: { routes: [] },
     })
     assert.ok(classes(tree).has('gw-modal'), 'the editor did not open')
     const text = collect(tree)
@@ -819,6 +839,69 @@ await check('a stale target is labelled inside the route editor too', () => {
   } finally {
     HOOKS.openEditor = null
   }
+})
+
+await check('a target that just failed is flagged in red, with its reason', () => {
+  /* A stale row is quiet: nothing asks it anything. A target that refused the
+     last request is the opposite — it costs a round-trip on every request until
+     it is fixed — so the page has to say so loudly and say why. */
+  const tree = render({
+    ...STATUS,
+    aliases: [{ alias: 'flash', targets: ['broken/dead', 'provider-a/only-a'] }],
+    rotation: { routes: [] },
+    faults: {
+      'broken/dead': {
+        code: 'PI_AI_ERROR',
+        status: undefined,
+        message: 'No API key for provider: broken (0a1b2c3d4e5f/1111-2222)',
+        at: Date.now(),
+        failover: true,
+        reason: 'No API key for provider: broken',
+      },
+    },
+  })
+  const text = collect(tree)
+  assert.ok(text.includes('routes.fault'), 'the failing hop carries no fault badge')
+  assert.ok(
+    text.includes('No API key for provider: broken'),
+    `the reason is not shown; saw: ${text.join(' ').slice(0, 240)}`,
+  )
+  assert.ok(classes(tree).has('is-fault'), 'the fault style is missing')
+  assert.ok(classes(tree).has('is-bad'), 'the fault badge is not in the error tone')
+  /* The row summary has to count it, or the tab looks healthy until opened. */
+  assert.ok(text.includes('routes.faultCount'), 'the row does not summarise the failing targets')
+  /* A fault outranks the cursor: "the next request starts here" is not news
+     when "here" is the thing that just failed. */
+  assert.ok(!classes(tree).has('is-cursor'), 'a failing target should not also be the cursor badge')
+  assert.equal(
+    text.filter((entry) => entry === 'routes.fault').length,
+    1,
+    'exactly one hop should be flagged',
+  )
+})
+
+await check('the routes tab badge turns red while a target is failing', () => {
+  const tree = render({
+    ...STATUS,
+    aliases: [{ alias: 'flash', targets: ['broken/dead', 'provider-a/only-a'] }],
+    rotation: { routes: [] },
+    faults: {
+      'broken/dead': { code: 'QUOTA', message: 'quota spent', at: Date.now(), failover: true, reason: 'quota spent' },
+    },
+  })
+  const dots = []
+  const walk = (node) => {
+    if (node === null || node === undefined || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      for (const child of node) walk(child)
+      return
+    }
+    const cls = node.props?.className
+    if (typeof cls === 'string' && cls.split(' ').includes('gw-tab-dot')) dots.push(cls)
+    for (const child of node.children ?? []) walk(child)
+  }
+  walk(tree)
+  assert.ok(dots.some((cls) => cls.includes('is-bad')), `no red tab dot; saw: ${dots.join(' | ')}`)
 })
 
 const failed = results.filter((entry) => !entry.ok)

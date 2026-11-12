@@ -41,7 +41,6 @@ window.__ModuleLoader__.load({
 			"page.on": "运行中",
 			"page.off": "已关闭",
 			"page.offHint": "网关在插件配置中被关闭，下面的地址与密钥暂不可用。",
-			"page.apiKey": "API Key",
 			"page.keyFile": "密钥保存在",
 			"page.port": "端口",
 			"page.portApply": "应用",
@@ -52,9 +51,22 @@ window.__ModuleLoader__.load({
 			"page.portBusy": "该端口已被占用，换一个或留空让它随机",
 			"page.portFailed": "切换端口失败",
 			"page.portDone": "已切到 {port}",
-			"page.regenerate": "生成",
+			"page.regenerate": "换掉第一把",
 			"page.regenerateConfirm": "确认更换？",
 			"page.keyRotated": "已生成新密钥，旧密钥立即失效，请更新客户端",
+			"page.keyAdded": "已添加密钥，可以立刻使用",
+			"page.keyRemoved": "已删除该密钥，它立即失效",
+			"page.keyRenamed": "备注已更新",
+			"page.keyFailed": "密钥操作失败",
+			"page.lastKey": "至少保留一把密钥",
+			"page.keyNotFound": "找不到这把密钥，可能已被删除",
+			"page.addKey": "添加密钥",
+			"page.keyLabel": "备注（可留空）",
+			"page.removeKey": "删除",
+			"page.renameKey": "改备注",
+			"page.saveLabel": "保存",
+			"page.keyPrimary": "第一把",
+			"page.keysSub": "可以同时启用多把，各自独立可用；删除或换掉后立即失效。第一把会作为示例里的密钥。",
 			"page.models": "模型目录",
 			"page.modelCount": "{count} 个模型 · {providers} 个 provider",
 			"page.copy": "复制",
@@ -88,7 +100,7 @@ window.__ModuleLoader__.load({
 			"page.tunnelSignup": "注册 ngrok 账号",
 			"page.tunnelToken": "获取 authtoken",
 			"page.alias": "模型路由",
-			"page.aliasHint": "给外部客户端用的短名字，映射到 provider/model。可以写多个目标，每行一个：前面的不可用（额度耗尽、限流、超时、5xx）时自动换下一个，失败的目标冷却 5 分钟。Cursor 发 gpt-4o 这类名字时靠它路由；撞名的模型必须走路由。",
+			"page.aliasHint": "给外部客户端用的短名字，映射到 provider/model。可以写多个目标，每行一个：前面的不可用（额度耗尽、限流、超时、5xx）时自动换下一个，并停在那里接着用；再下一个请求从它继续往下走，走到底就回到队首。",
 			"page.aliasName": "路由名",
 			"page.aliasTarget": "目标 provider/model（每行一个，按顺序兜底）",
 			"page.aliasAdd": "添加",
@@ -97,7 +109,6 @@ window.__ModuleLoader__.load({
 			"page.aliasBad": "路由名或目标格式不对（目标需为 provider/model，每行一个）",
 			"page.aliasEmpty": "还没有路由",
 			"page.aliasRemove": "删除",
-			"page.aliasCooling": "冷却中",
 			"page.aria": "模型网关",
 			"panel.empty": "暂无模型",
 			"stat.requests": "请求",
@@ -118,8 +129,9 @@ window.__ModuleLoader__.load({
 			"recent.time": "时间",
 			"recent.model": "模型",
 			"recent.result": "结果",
-			"recent.tokens": "令牌",
+			"recent.tokens": "token",
 			"recent.took": "耗时",
+			"recent.servedBy": "实际模型",
 			"recent.ok": "成功",
 			"recent.failed": "失败",
 			"recent.empty": "还没有请求记录",
@@ -134,7 +146,12 @@ window.__ModuleLoader__.load({
 			"routes.health": "健康度",
 			"routes.count": "{count} 条",
 			"routes.healthy": "全部可用",
-			"routes.bench": "{count} 个冷却",
+			"routes.moved": "{count} 条已轮换",
+			"routes.movedOne": "已轮换",
+			"routes.movedOneHint": "下一个请求从 {target} 开始",
+			"routes.cursor": "当前使用",
+			"routes.cursorHint": "下一个请求从这条目标开始",
+			"routes.cursorMovedHint": "上一个请求由 {from} 服务，下一个从这条开始",
 			"routes.fallback": "备用",
 			"routes.primary": "首选",
 			"routes.add": "添加路由",
@@ -174,9 +191,12 @@ window.__ModuleLoader__.load({
 			"routes.unavailableHint": "这个 provider 或模型已经不在当前目录里，请求会直接跳过它。编辑路由换成现存的目标。",
 			"routes.unavailableMeta": "已失效，不会生效，建议移除或替换",
 			"routes.goneCount": "{count} 个已失效",
-			"cool.title": "冷却中",
-			"cool.summary": "{count} 个目标正在冷却，最近一个还有 {seconds}s 恢复。冷却期间请求直接跳过它，不会先失败一次。",
-			"cool.none": "所有目标都可用",
+	"routes.fault": "故障",
+	"routes.faultHint": "上一个请求在这里失败：{reason}",
+	"routes.faultCount": "{count} 个目标报错",
+	"routes.faultMeta": "刚才请求失败，切到下一个目标；修好之前每个请求都会先浪费一次尝试。",
+			"rot.title": "轮换中",
+			"rot.summary": "{count} 条路由的当前使用目标不在队首。{alias} 下一个从 {next} 开始，走到底再回到队首。",
 			"tunnel.title": "公网隧道",
 			"tunnel.sub": "把本机网关挂到一个公网地址上，供只能填外链的客户端使用。",
 			"tunnel.heroRunning": "公网地址",
@@ -194,6 +214,7 @@ window.__ModuleLoader__.load({
 			"tunnel.restartHint": "当前隧道用的是 {current}，切换会短暂断开公网地址。",
 			"tunnel.ngrokDesc": "需要 authtoken，免费版每次重启换域名",
 			"tunnel.cloudflaredDesc": "无需账号，域名随机且更短",
+			"tunnel.tryOther": "改用 {provider}",
 			"tunnel.credTitle": "这个隧道方式还缺凭据",
 			"tunnel.credBody": "ngrok 需要一个账号和 authtoken：注册后在后台复制 token，然后执行 {cmd}，再回到这里开启隧道。",
 			"settings.title": "接入设置",
@@ -202,7 +223,6 @@ window.__ModuleLoader__.load({
 			"settings.endpointsSub": "外部客户端填对外地址，本机客户端填本机地址。",
 			"settings.localSub": "与对外地址指向同一个网关，只在本机可达。",
 			"settings.key": "密钥",
-			"settings.keySub": "换密钥后旧密钥立刻失效，已配置的客户端要同步更新。",
 			"settings.port": "监听端口",
 			"settings.portSub": "网关独占这个端口，与界面端口无关。",
 			"settings.example": "请求示例",
@@ -215,7 +235,6 @@ window.__ModuleLoader__.load({
 			"page.on": "Running",
 			"page.off": "Off",
 			"page.offHint": "The gateway is disabled in the plugin config; the address and key below are not live.",
-			"page.apiKey": "API key",
 			"page.keyFile": "Key stored in",
 			"page.port": "Port",
 			"page.portApply": "Apply",
@@ -226,9 +245,22 @@ window.__ModuleLoader__.load({
 			"page.portBusy": "That port is taken; pick another or leave it empty to let the host choose",
 			"page.portFailed": "Could not switch the port",
 			"page.portDone": "Now on {port}",
-			"page.regenerate": "Regenerate",
+			"page.regenerate": "Replace first",
 			"page.regenerateConfirm": "Confirm?",
 			"page.keyRotated": "New key minted; the old one stopped working, so update your clients",
+			"page.keyAdded": "Key added and ready to use",
+			"page.keyRemoved": "Key deleted; it stopped working at once",
+			"page.keyRenamed": "Label updated",
+			"page.keyFailed": "The key change failed",
+			"page.lastKey": "Keep at least one key",
+			"page.keyNotFound": "That key is gone — it may have been deleted already",
+			"page.addKey": "Add key",
+			"page.keyLabel": "Label (optional)",
+			"page.removeKey": "Delete",
+			"page.renameKey": "Rename",
+			"page.saveLabel": "Save",
+			"page.keyPrimary": "first",
+			"page.keysSub": "Several keys can be live at once and each works on its own; deleting or replacing one revokes it at once. The first key is the one shown in the example.",
 			"page.models": "Model catalogue",
 			"page.modelCount": "{count} models · {providers} providers",
 			"page.copy": "Copy",
@@ -262,7 +294,7 @@ window.__ModuleLoader__.load({
 			"page.tunnelSignup": "Create an ngrok account",
 			"page.tunnelToken": "Get an authtoken",
 			"page.alias": "Model routes",
-			"page.aliasHint": "Short names for external clients, mapped to provider/model. Multiple targets are allowed, one per line: when an earlier one is unavailable (quota spent, rate limited, timed out, 5xx) the next one answers, and the failed target cools down for 5 minutes. This is how Cursor's gpt-4o gets routed; a model whose name collides must go through a route.",
+			"page.aliasHint": "Short names for external clients, mapped to provider/model. Multiple targets are allowed, one per line: when an earlier one is unavailable (quota spent, rate limited, timed out, 5xx) the next one answers and becomes the new start, so later requests continue down the chain and wrap back to the head at the end. This is how Cursor's gpt-4o gets routed; a model whose name collides must go through a route.",
 			"page.aliasName": "Route name",
 			"page.aliasTarget": "Target provider/model (one per line, tried in order)",
 			"page.aliasAdd": "Add",
@@ -271,7 +303,6 @@ window.__ModuleLoader__.load({
 			"page.aliasBad": "That route name or target is malformed (targets are provider/model, one per line)",
 			"page.aliasEmpty": "No routes yet",
 			"page.aliasRemove": "Remove",
-			"page.aliasCooling": "Cooling down",
 			"page.aria": "Model gateway",
 			"panel.empty": "No models",
 			"stat.requests": "Requests",
@@ -292,8 +323,9 @@ window.__ModuleLoader__.load({
 			"recent.time": "Time",
 			"recent.model": "Model",
 			"recent.result": "Result",
-			"recent.tokens": "Tokens",
+			"recent.tokens": "token",
 			"recent.took": "Took",
+			"recent.servedBy": "Served by",
 			"recent.ok": "ok",
 			"recent.failed": "failed",
 			"recent.empty": "No requests recorded yet",
@@ -308,7 +340,12 @@ window.__ModuleLoader__.load({
 			"routes.health": "Health",
 			"routes.count": "{count} routes",
 			"routes.healthy": "All available",
-			"routes.bench": "{count} cooling",
+			"routes.moved": "{count} rotated",
+			"routes.movedOne": "Rotated",
+			"routes.movedOneHint": "the next request starts at {target}",
+			"routes.cursor": "in use",
+			"routes.cursorHint": "The next request starts at this target",
+			"routes.cursorMovedHint": "{from} served the last request; the next one starts here",
 			"routes.fallback": "fallback",
 			"routes.primary": "primary",
 			"routes.add": "Add route",
@@ -348,9 +385,12 @@ window.__ModuleLoader__.load({
 			"routes.unavailableHint": "This provider or model is no longer in the catalogue, so requests skip it. Edit the route to use a live target.",
 			"routes.unavailableMeta": "no longer available — remove or replace it",
 			"routes.goneCount": "{count} unavailable",
-			"cool.title": "Cooling down",
-			"cool.summary": "{count} targets are benched; the next recovers in {seconds}s. Requests skip them instead of failing once first.",
-			"cool.none": "Every target is available",
+	"routes.fault": "Error",
+	"routes.faultHint": "The last request failed here: {reason}",
+	"routes.faultCount": "{count} target(s) failing",
+	"routes.faultMeta": "The last request failed here and moved on; until it is fixed, every request spends one attempt on it.",
+			"rot.title": "Rotating",
+			"rot.summary": "{count} routes no longer start at the head. {alias} starts at {next} and wraps back to the head at the end.",
 			"tunnel.title": "Public tunnel",
 			"tunnel.sub": "Expose the local gateway on a public address for clients that only accept a link.",
 			"tunnel.heroRunning": "Public address",
@@ -368,6 +408,7 @@ window.__ModuleLoader__.load({
 			"tunnel.restartHint": "The tunnel currently uses {current}; switching drops the public address briefly.",
 			"tunnel.ngrokDesc": "Needs an authtoken; the free tier changes domain on restart",
 			"tunnel.cloudflaredDesc": "No account; random, shorter domain",
+			"tunnel.tryOther": "Use {provider}",
 			"tunnel.credTitle": "This method still needs a credential",
 			"tunnel.credBody": "ngrok needs an account and an authtoken: sign up, copy the token from the dashboard, run {cmd}, then come back and start the tunnel.",
 			"settings.title": "Access settings",
@@ -376,7 +417,6 @@ window.__ModuleLoader__.load({
 			"settings.endpointsSub": "External clients take the public address; local clients take the local one.",
 			"settings.localSub": "Same gateway as the public address, reachable only from this machine.",
 			"settings.key": "Key",
-			"settings.keySub": "Regenerating invalidates the old key at once, so update every configured client.",
 			"settings.port": "Listen port",
 			"settings.portSub": "The gateway owns this port; it is unrelated to the UI port.",
 			"settings.example": "Request example",
@@ -576,21 +616,26 @@ window.__ModuleLoader__.load({
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* ---- the cooling callout: only rendered when something is benched ---- */
-[${STYLE_ATTR}] .gw-cool {
+/* ---- the rotation callout: only rendered when a route's cursor has moved ----
+   There is no clock behind it any more, so this is a neutral notice rather than
+   a warning: a moved cursor is normal operation, not a fault. */
+[${STYLE_ATTR}] .gw-rot {
 	display: flex; align-items: flex-start; gap: var(--gw-s2);
 	padding: 10px var(--gw-s4);
 	border-radius: var(--dsw-radius-md);
-	border: 1px solid var(--dsw-alias-state-warn-primary);
-	background: var(--dsw-alias-state-warn-tertiary);
+	border: 1px solid var(--dsw-alias-border-l2);
+	background: var(--dsw-alias-bg-layer-1);
 	color: var(--dsw-alias-label-primary);
 	font-size: 12px; line-height: 1.65;
 }
-[${STYLE_ATTR}] .gw-cool-ico { color: var(--dsw-alias-state-warn-label); flex: none; font-weight: 700; }
-[${STYLE_ATTR}] .gw-cool b { font-variant-numeric: tabular-nums; }
-[${STYLE_ATTR}] .gw-cool code {
+[${STYLE_ATTR}] .gw-rot-ico {
+	color: var(--dsw-alias-state-business-primary); flex: none;
+	font-weight: 700; font-size: 13px; line-height: 1.5;
+}
+[${STYLE_ATTR}] .gw-rot b { font-variant-numeric: tabular-nums; }
+[${STYLE_ATTR}] .gw-rot code {
 	font-family: var(--dsw-font-mono); font-size: 11.5px;
-	background: var(--dsw-alias-bg-layer-1); padding: 0 4px; border-radius: var(--dsw-radius-xs);
+	background: var(--dsw-alias-bg-layer-2); padding: 0 4px; border-radius: var(--dsw-radius-xs);
 }
 
 /* ---- metric tiles ---- */
@@ -638,8 +683,24 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-tnum { font-variant-numeric: tabular-nums; }
 [${STYLE_ATTR}] .gw-mono { font-family: var(--dsw-font-mono); }
 
-/* recent-request grid */
-[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 72px minmax(0, 1.6fr) 96px 104px 64px; }
+/* recent-request grid: time / model / result / served-by / tokens / took.
+   Every column that holds a number — or a badge, which is a shape rather than
+   prose — is aligned on the same edge in the header and the body, so the header
+   sits over its own column instead of drifting against it. The time column and
+   the took column are right-aligned; result and tokens are centred, because a
+   badge and a pair of figures both read best from their middle. */
+[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 78px minmax(0, 1.3fr) 82px minmax(0, 1.2fr) 112px 76px; }
+[${STYLE_ATTR}] .gw-grid-recent > .gw-tnum,
+[${STYLE_ATTR}] .gw-grid-recent > .gw-th-num { text-align: right; }
+[${STYLE_ATTR}] .gw-grid-recent > .gw-tmid,
+[${STYLE_ATTR}] .gw-grid-recent > .gw-th-mid { text-align: center; }
+[${STYLE_ATTR}] .gw-th-num, [${STYLE_ATTR}] .gw-th-mid { font-weight: 400; }
+[${STYLE_ATTR}] .gw-served { display: inline-block; }
+[${STYLE_ATTR}] .gw-served.is-moved {
+	color: var(--dsw-alias-state-warn-label);
+	/* Failover changed which model answered; that is worth noticing. */
+	border-bottom: 1px dotted var(--dsw-alias-state-warn-primary);
+}
 
 /* route grid: name / chain / health / actions */
 [${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 150px minmax(0, 1fr) 106px 116px; }
@@ -675,31 +736,55 @@ window.__ModuleLoader__.load({
 	color: var(--dsw-alias-label-tertiary);
 	font-variant-numeric: tabular-nums;
 }
-[${STYLE_ATTR}] .gw-hop-idx.is-first {
+/* Only the hop the next request starts at is filled in. Hop 1 used to carry the
+   fill, which was wrong the moment a failover moved the cursor past it: two
+   filled numbers say "start here" twice. A plain circle means "configured, but
+   not where the next request begins". */
+[${STYLE_ATTR}] .gw-hop-idx.is-cursor {
 	border-color: transparent;
 	background: var(--dsw-alias-state-business-primary);
 	color: var(--dsw-alias-label-primary-foreground);
 }
 [${STYLE_ATTR}] .gw-hop-id {
-	flex: 1 1 auto; min-width: 0;
+	/* Content-sized, not greedy: a failing hop puts its reason right after the
+	   target name, and a flex-grow id would shove that reason to the far edge
+	   where it reads as a column of its own. */
+	flex: 0 1 auto; min-width: 0;
 	font-family: var(--dsw-font-mono); font-size: 11.5px;
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-[${STYLE_ATTR}] .gw-hop.is-cooling .gw-hop-id {
-	color: var(--dsw-alias-label-caption);
-	text-decoration: line-through;
+/* The cursor hop: where the next request on this route starts. It is not a
+   fault, so it keeps full contrast and gets an arrow instead of a strike. */
+[${STYLE_ATTR}] .gw-hop.is-cursor .gw-hop-id { font-weight: 600; }
+/* A hop whose last request failed. It is not stale like is-gone — the target
+   still exists and is still being asked — so it gets the error colour and keeps
+   its normal weight, with the adapter's reason trailing it in smaller type. */
+[${STYLE_ATTR}] .gw-hop.is-fault .gw-hop-id {
+	color: var(--dsw-alias-state-error-primary);
+	text-decoration: underline;
+	text-decoration-style: dotted;
 	text-decoration-color: var(--dsw-alias-state-error-primary);
 }
-[${STYLE_ATTR}] .gw-hop-side { flex: none; display: inline-flex; align-items: center; gap: 5px; }
-[${STYLE_ATTR}] .gw-meter {
-	display: inline-block; width: 38px; height: 3px; flex: none;
-	border-radius: 999px; overflow: hidden;
-	background: var(--dsw-alias-bg-layer-3);
+[${STYLE_ATTR}] .gw-hop-why {
+	flex: 0 1 auto; min-width: 0;
+	font-size: 11px;
+	color: var(--dsw-alias-label-tertiary);
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-[${STYLE_ATTR}] .gw-meter > i { display: block; height: 100%; background: var(--dsw-alias-state-error-primary); }
-[${STYLE_ATTR}] .gw-hop-eta {
-	color: var(--dsw-alias-label-caption); font-size: 11px;
-	font-variant-numeric: tabular-nums; min-width: 34px; text-align: right;
+[${STYLE_ATTR}] .gw-hop.is-fault .gw-hop-why { color: var(--dsw-alias-state-error-primary); opacity: 0.85; }
+[${STYLE_ATTR}] .gw-hop-side { flex: none; display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
+/* Where the next request starts, said the way the account list says it: a small
+   dot and three words, no pill. A pill here read as a peer of 备用, and the
+   cursor is not a state of health — it is a position. */
+[${STYLE_ATTR}] .gw-cursor-mark {
+	flex: none; display: inline-flex; align-items: center; gap: 5px;
+	font-size: 11px; line-height: 1;
+	color: var(--dsw-alias-state-business-primary);
+	white-space: nowrap;
+}
+[${STYLE_ATTR}] .gw-cursor-mark::before {
+	content: ""; width: 5px; height: 5px; border-radius: 50%;
+	flex: none; background: currentColor;
 }
 
 /* ---- badges ---- */
@@ -735,8 +820,8 @@ window.__ModuleLoader__.load({
 	background: var(--dsw-alias-state-business-tertiary);
 }
 /* A retired target: it will not recover on its own, so it is marked differently
-   from a benched (temporarily cooling) one. Dashed border reads as "this row is
-   stale" rather than "this row failed". */
+   from the hop the cursor currently starts on. Dashed border reads as "this row
+   is stale" rather than "this row failed". */
 [${STYLE_ATTR}] .gw-badge.is-gone {
 	color: var(--dsw-alias-label-tertiary);
 	border-color: var(--dsw-alias-border-l3);
@@ -793,6 +878,89 @@ window.__ModuleLoader__.load({
 /* A control inside a value row keeps its own size: the port field was being
    squeezed to a single visible digit by the flex row around it. */
 [${STYLE_ATTR}] .gw-kv-ctl .gw-input { flex: none; }
+
+/* ---- the key list: one row per live key ----
+   Keys are not a single value any more, so they get a list instead of a value
+   row: each row carries its own copy/rename/delete, and the shared actions
+   (reveal, replace the first key) sit once underneath. */
+[${STYLE_ATTR}] .gw-keys {
+	display: flex; flex-direction: column;
+	border: 1px solid var(--dsw-alias-border-l2);
+	border-radius: var(--dsw-radius-sm);
+	overflow: hidden;
+}
+[${STYLE_ATTR}] .gw-key {
+	display: flex; align-items: center; gap: var(--gw-s2);
+	padding: 7px 10px; flex-wrap: wrap;
+}
+[${STYLE_ATTR}] .gw-key + .gw-key { border-top: 1px solid var(--dsw-alias-border-l1); }
+[${STYLE_ATTR}] .gw-key-main {
+	display: flex; align-items: center; gap: 6px;
+	flex: 1 1 auto; min-width: 0;
+}
+[${STYLE_ATTR}] .gw-key-value {
+	font-family: var(--dsw-font-mono); font-size: 12px;
+	color: var(--dsw-alias-label-secondary);
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	flex: 0 1 auto; min-width: 0;
+}
+[${STYLE_ATTR}] .gw-key-label {
+	color: var(--dsw-alias-label-tertiary); font-size: 11px;
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	min-width: 0;
+}
+[${STYLE_ATTR}] .gw-key-main .gw-input { flex: 1 1 auto; min-width: 90px; }
+[${STYLE_ATTR}] .gw-key-actions { display: flex; align-items: center; gap: 4px; flex: none; }
+[${STYLE_ATTR}] .gw-key-add {
+	display: flex; align-items: center; gap: 6px;
+	margin-top: var(--gw-s2); flex-wrap: wrap;
+}
+[${STYLE_ATTR}] .gw-key-add .gw-input { flex: 1 1 140px; min-width: 0; }
+[${STYLE_ATTR}] .gw-key-foot {
+	display: flex; align-items: center; gap: 6px;
+	margin-top: var(--gw-s3); flex-wrap: wrap;
+}
+[${STYLE_ATTR}] .gw-key-path {
+	color: var(--dsw-alias-label-caption); font-size: 11px;
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+	min-width: 0; flex: 1 1 auto; text-align: right;
+}
+[${STYLE_ATTR}] .gw-input.is-sm { height: 24px; padding: 0 6px; font-size: 11.5px; }
+
+/* ---- a failed tunnel start ----
+   Diagnosis first, advice second, and a way out that does not need the broken
+   agent: the other provider is always one button away, because a missing binary
+   is a fact about this machine, not about the gateway. */
+[${STYLE_ATTR}] .gw-fail {
+	display: flex; flex-direction: column; gap: 6px;
+	padding: 10px var(--gw-s4);
+	border-radius: var(--dsw-radius-md);
+	border: 1px solid var(--dsw-alias-state-error-primary);
+	background: var(--dsw-alias-bg-layer-1);
+}
+[${STYLE_ATTR}] .gw-fail-head { display: flex; align-items: flex-start; gap: 6px; }
+[${STYLE_ATTR}] .gw-fail-ico {
+	flex: none; width: 15px; height: 15px; border-radius: 50%;
+	display: inline-flex; align-items: center; justify-content: center;
+	background: var(--dsw-alias-state-error-primary);
+	color: var(--dsw-alias-label-primary-foreground);
+	font-size: 10px; font-weight: 700; line-height: 1;
+	margin-top: 2px;
+}
+[${STYLE_ATTR}] .gw-fail-head b {
+	font-size: 12px; font-weight: 600; line-height: 1.55;
+	color: var(--dsw-alias-label-primary);
+	overflow-wrap: anywhere;
+}
+[${STYLE_ATTR}] .gw-fail-body {
+	margin: 0; padding-left: 21px;
+	color: var(--dsw-alias-label-tertiary); font-size: 11.5px; line-height: 1.6;
+	overflow-wrap: anywhere;
+}
+[${STYLE_ATTR}] .gw-fail-actions {
+	display: flex; align-items: center; gap: 6px;
+	padding-left: 21px; flex-wrap: wrap;
+}
 
 /* ---- tunnel hero ---- */
 [${STYLE_ATTR}] .gw-hero {
@@ -1283,9 +1451,10 @@ window.__ModuleLoader__.load({
 	[${STYLE_ATTR}] .gw-chain-list { max-height: 180px; }
 	[${STYLE_ATTR}] .gw-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	[${STYLE_ATTR}] .gw-picks { grid-template-columns: minmax(0, 1fr); }
-	[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 64px minmax(0, 1fr) 88px; }
+	[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 64px minmax(0, 1fr) 76px; }
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(4),
-	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(5) { display: none; }
+	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(5),
+	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(6) { display: none; }
 	[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 118px minmax(0, 1fr) 90px 112px; }
 	[${STYLE_ATTR}] .gw-kv { align-items: flex-start; flex-direction: column; }
 	[${STYLE_ATTR}] .gw-kv-ctl { max-width: 100%; width: 100%; }
@@ -1469,6 +1638,11 @@ window.__ModuleLoader__.load({
 			const [portDraft, setPortDraft] = useState("");
 			const [notice, setNotice] = useState(null);
 			const [confirmKey, setConfirmKey] = useState(false);
+			// The draft for a key about to be added, and the label being edited on
+			// an existing one. Both are per-row state; only one edit is open at a
+			// time, which is why a single pair of values is enough.
+			const [keyLabel, setKeyLabel] = useState("");
+			const [editingLabel, setEditingLabel] = useState(null);
 			// `null` means "not edited yet": the table below is then read straight
 			// from the status document. It is only set once the user commits an
 			// edit, so a refresh never clobbers an in-progress one.
@@ -1532,16 +1706,6 @@ window.__ModuleLoader__.load({
 				load();
 			}, [load]);
 
-			// A countdown has to tick on its own: the status document is only read
-			// on demand, so without this the remaining seconds would freeze at
-			// whatever the last read said. One timer, only while something cools.
-			const [tick, setTick] = useState(0);
-			useEffect(() => {
-				const timer = setInterval(() => setTick((value) => value + 1), 1000);
-				return () => clearInterval(timer);
-			}, []);
-			void tick;
-
 			const isOn = status !== null && status.enabled === true;
 
 			// The alias table is server state; `aliasDraftRows` only exists once
@@ -1549,13 +1713,13 @@ window.__ModuleLoader__.load({
 			// has instead of waiting for an effect to copy it across.
 			const aliasTable = Array.isArray(status?.aliases) ? status.aliases : [];
 
-			// Which targets are sitting out, straight from the host's cooldown
-			// table. Read through a lookup rather than pre-indexed, so a row whose
-			// target is not cooling costs nothing.
-			const coolingList = Array.isArray(status?.failover?.cooling) ? status.failover.cooling : [];
-			const coolingFor = useCallback(
-				(target) => coolingList.find((entry) => entry.target === target),
-				[coolingList],
+			// Where each route's cursor currently stands, straight from the host.
+			// Nothing expires here, so there is no countdown to tick and no clock
+			// to keep in sync: the cursor only moves when a request moves it.
+			const rotationRoutes = Array.isArray(status?.rotation?.routes) ? status.rotation.routes : [];
+			const cursorFor = useCallback(
+				(alias) => rotationRoutes.find((entry) => entry.alias === alias),
+				[rotationRoutes],
 			);
 
 			// Targets the live catalogue no longer advertises — a renamed provider or
@@ -1569,6 +1733,12 @@ window.__ModuleLoader__.load({
 				for (const target of Array.isArray(row.unavailable) ? row.unavailable : []) unavailableSet.add(target);
 			}
 			const isUnavailable = (target) => unavailableSet.has(target);
+			// Targets that refused their last request, with the adapter's own
+			// words. Distinct from `unavailable`: that one means "this row no
+			// longer exists in the catalogue", while a fault means "this row
+			// exists and just failed", which is what a red badge is for.
+			const faults = status?.faults !== null && typeof status?.faults === "object" ? status.faults : {};
+			const faultFor = (target) => (Object.prototype.hasOwnProperty.call(faults, target) ? faults[target] : undefined);
 			// Rows arrive in one shape from the host (`{alias, targets}`) and in the
 			// same shape from the local draft, so nothing has to branch on origin.
 			// A row written by an older build carried a single `target` string;
@@ -1626,33 +1796,60 @@ window.__ModuleLoader__.load({
 				}
 			}, [portDraft, load, t]);
 
-			/** Mint a new key; the old one stops authorising at once. */
-			const rotateKey = useCallback(async () => {
-				if (!confirmKey) {
-					setConfirmKey(true);
-					setTimeout(() => setConfirmKey(false), 4000);
-					return;
-				}
-				setConfirmKey(false);
-				try {
-					const response = await fetch(KEY_PATH, {
-						method: "POST",
-						cache: "no-store",
-						credentials: "same-origin",
-						headers: { Accept: "application/json", "Content-Type": "application/json" },
-						body: JSON.stringify({ action: "regenerate" }),
-					});
-					if (!response.ok) {
-						setNotice({ scope: "key", kind: "bad", text: t("page.portFailed") });
+			/**
+			 * Every key edit goes through the same route; `action` says which.
+			 *
+			 * Several keys can be live at once, so adding one is the normal way to
+			 * hand a key to another client — regenerating replaces the first key and
+			 * leaves the rest alone, which is what "rotate the primary" means.
+			 */
+			const keyAction = useCallback(
+				async (action, payload = {}) => {
+					if (action === "regenerate" && !confirmKey) {
+						setConfirmKey(true);
+						setTimeout(() => setConfirmKey(false), 4000);
 						return;
 					}
-					setRevealed(true);
-					setNotice({ scope: "key", kind: "ok", text: t("page.keyRotated") });
-					await load();
-				} catch {
-					setNotice({ scope: "key", kind: "bad", text: t("page.portFailed") });
-				}
-			}, [confirmKey, load, t]);
+					setConfirmKey(false);
+					try {
+						const response = await fetch(KEY_PATH, {
+							method: "POST",
+							cache: "no-store",
+							credentials: "same-origin",
+							headers: { Accept: "application/json", "Content-Type": "application/json" },
+							body: JSON.stringify({ action, ...payload }),
+						});
+						const body = await response.json().catch(() => ({}));
+						if (!response.ok) {
+							const text =
+								body?.error === "last-key"
+									? t("page.lastKey")
+									: body?.error === "key-not-found"
+										? t("page.keyNotFound")
+										: t("page.keyFailed");
+							setNotice({ scope: "key", kind: "bad", text });
+							return;
+						}
+						if (action === "add") setKeyLabel("");
+						setNotice({
+							scope: "key",
+							kind: "ok",
+							text:
+								action === "add"
+									? t("page.keyAdded")
+									: action === "remove"
+										? t("page.keyRemoved")
+										: action === "rename"
+											? t("page.keyRenamed")
+											: t("page.keyRotated"),
+						});
+						await load();
+					} catch {
+						setNotice({ scope: "key", kind: "bad", text: t("page.keyFailed") });
+					}
+				},
+				[confirmKey, load, t],
+			);
 
 			const noticeFor = (scope) =>
 				notice !== null && notice.scope === scope
@@ -1923,11 +2120,15 @@ window.__ModuleLoader__.load({
 			const uptime = Number.isFinite(status?.startedAt) ? Date.now() - status.startedAt : 0;
 			const recent = Array.isArray(status?.recent) ? status.recent : [];
 
-			/* Routes are the alias table plus whatever is benched right now. The
-			 * count is what the tab badge shows, so a benched target is visible
-			 * without opening the tab. */
-			const coolingCount = coolingList.length;
+			/* Routes are the alias table plus wherever each cursor currently sits.
+			 * The count is what the tab badge shows, so a route that has moved off
+			 * its first target is visible without opening the tab. */
+			const movedCount = rotationRoutes.length;
 			const routeCount = aliasRows.length;
+			// Targets that refused their last request. This is the number the
+			// page treats as "something is wrong", as opposed to "the cursor has
+			// moved", which is normal operation.
+			const faultCount = Object.keys(faults).length;
 
 			const statTile = (key, label, value, hint) =>
 				h(
@@ -1974,25 +2175,23 @@ window.__ModuleLoader__.load({
 				);
 			};
 
-			/** The cooling strip: only meaningful when something is benched. */
-			const coolingStrip = () => {
-				if (coolingCount === 0) return null;
-				const soonest = coolingList.reduce(
-					(min, entry) => (entry.remainingMs < min ? entry.remainingMs : min),
-					coolingList[0].remainingMs,
-				);
+			/** The rotation strip: only meaningful when a cursor has left the head. */
+			const rotationStrip = () => {
+				if (movedCount === 0) return null;
+				const lead = rotationRoutes.find((entry) => entry.code !== undefined) ?? rotationRoutes[0];
 				return h(
 					"div",
-					{ className: "gw-cool" },
-					h("span", { className: "gw-cool-ico" }, "!"),
+					{ className: "gw-rot" },
+					h("span", { className: "gw-rot-ico" }, "↻"),
 					h(
 						"div",
 						null,
-						h("b", null, t("cool.title")),
+						h("b", null, t("rot.title")),
 						" — ",
-						fill(t("cool.summary"), {
-							count: coolingCount,
-							seconds: Math.max(0, Math.ceil(soonest / 1000)),
+						fill(t("rot.summary"), {
+							count: movedCount,
+							alias: lead?.alias ?? "—",
+							next: lead?.next ?? "—",
 						}),
 					),
 				);
@@ -2005,7 +2204,7 @@ window.__ModuleLoader__.load({
 					status === null ? h("div", { className: "gw-empty" }, t("page.loading")) : null,
 					status !== null && !isOn ? h("div", { className: "gw-card" }, t("page.offHint")) : null,
 					status === null ? null : tunnelBar(),
-					coolingStrip(),
+					rotationStrip(),
 					status === null
 						? null
 						: h(
@@ -2070,11 +2269,12 @@ window.__ModuleLoader__.load({
 									h(
 										"div",
 										{ className: "gw-trow gw-thead gw-grid-recent" },
-										h("span", null, t("recent.time")),
+										h("span", { className: "gw-tnum gw-th-num" }, t("recent.time")),
 										h("span", null, t("recent.model")),
-										h("span", null, t("recent.result")),
-										h("span", { className: "gw-tnum" }, t("recent.tokens")),
-										h("span", { className: "gw-tnum" }, t("recent.took")),
+										h("span", { className: "gw-th-mid" }, t("recent.result")),
+										h("span", null, t("recent.servedBy")),
+										h("span", { className: "gw-tnum gw-th-num" }, t("recent.tokens")),
+										h("span", { className: "gw-tnum gw-th-num" }, t("recent.took")),
 									),
 									h(
 										"div",
@@ -2082,19 +2282,35 @@ window.__ModuleLoader__.load({
 										recent.map((entry, index) => {
 											const ok = entry?.outcome === "ok";
 											const usage = entry?.usage;
+											// What actually served: the failover target, which is the
+											// fact a debugging session needs — the caller named one
+											// model, a different one may have answered.
+											const served =
+												typeof entry?.provider === "string" && typeof entry?.upstreamModel === "string"
+													? `${entry.provider}/${entry.upstreamModel}`
+													: (entry?.provider ?? "—");
+											const moved =
+												typeof entry?.model === "string" &&
+												served !== "—" &&
+												entry.model !== served;
 											return h(
 												"div",
 												{ className: "gw-trow gw-grid-recent", key: `${entry?.at ?? index}-${index}` },
 												h("span", { className: "gw-tcell gw-tnum" }, clockOf(entry?.at)),
-												h("span", { className: "gw-tcell gw-mono" }, entry?.model ?? "—"),
+												h("span", { className: "gw-tcell gw-mono", title: entry?.model }, entry?.model ?? "—"),
 												h(
 													"span",
-													{ className: "gw-tcell" },
+													{ className: "gw-tcell gw-tmid" },
 													h(
 														"span",
 														{ className: `gw-badge ${ok ? "is-ok" : "is-bad"}` },
 														ok ? t("recent.ok") : (entry?.code ?? t("recent.failed")),
 													),
+												),
+												h("span", { className: "gw-tcell gw-mono", title: served },
+													moved
+														? h("span", { className: "gw-served is-moved", title: t("recent.servedBy") }, served)
+														: served,
 												),
 												h(
 													"span",
@@ -2115,39 +2331,68 @@ window.__ModuleLoader__.load({
 					),
 				);
 
-			/** One hop of a route chain: index, id, and its health when benched. */
-			const routeHop = (target, index) => {
-				const cooling = coolingFor(target);
-				const coolingNow = cooling !== undefined;
+			/** One hop of a route chain: index, id, and whether it is the cursor. */
+			const routeHop = (target, index, cursor) => {
 				const gone = isUnavailable(target);
-				const remaining = coolingNow ? Math.max(0, Math.ceil(cooling.remainingMs / 1000)) : 0;
-				const cooldown = Number.isFinite(status?.failover?.cooldownMs) ? status.failover.cooldownMs : 300000;
-				const share = coolingNow ? Math.max(0, Math.min(1, cooling.remainingMs / cooldown)) : 0;
+				// A target that refused its last request is the loudest state a hop
+				// can be in: a retired row is merely stale, while this one is being
+				// asked and answering with an error. It outranks the cursor badge,
+				// because "the next request starts here" is not news when here is
+				// broken.
+				const fault = gone ? undefined : faultFor(target);
+				const isFault = fault !== undefined;
+				// The cursor marks where the *next* request starts, which after a
+				// failover is no longer hop 1 — that is the whole point of showing
+				// it. A retired target still outranks it, because a stale row never
+				// recovers on its own while a cursor is normal operation.
+				const isCursor = !gone && !isFault && cursor?.next === target;
+				const movedFrom = isCursor && cursor?.movedFrom !== undefined && cursor.movedFrom !== target ? cursor.movedFrom : null;
 				return h(
 					"div",
-					{ className: `gw-hop ${coolingNow ? "is-cooling" : ""} ${gone ? "is-gone" : ""}`, key: target },
-					h("span", { className: `gw-hop-idx ${index === 0 ? "is-first" : ""}` }, String(index + 1)),
+					{
+						className: `gw-hop ${isCursor ? "is-cursor" : ""} ${isFault ? "is-fault" : ""} ${gone ? "is-gone" : ""}`,
+						key: target,
+					},
+					h("span", { className: `gw-hop-idx ${index === 0 ? "is-first" : ""} ${isCursor ? "is-cursor" : ""}` }, String(index + 1)),
 					h("span", { className: "gw-hop-id", title: target }, target),
-					// A retired target is the more useful fact than its cooldown: it will
-					// never recover on its own, so it keeps the label even while cooling.
+					isFault
+						? h("span", { className: "gw-hop-why", title: fault.message ?? "" }, fault.reason ?? "")
+						: null,
 					gone
 						? h(
 								"span",
 								{ className: "gw-hop-side" },
 								h("span", { className: "gw-badge is-gone", title: t("routes.unavailableHint") }, t("routes.unavailable")),
 							)
-						: coolingNow
+						: isFault
 						? h(
 								"span",
 								{ className: "gw-hop-side" },
-								h("span", { className: "gw-badge is-bad" }, t("page.aliasCooling")),
-								h("span", { className: "gw-meter" }, h("i", { style: { width: `${share * 100}%` } })),
-								h("span", { className: "gw-hop-eta" }, `${remaining}s`),
+								h(
+									"span",
+									{
+										className: "gw-badge is-bad",
+										title: fault.message === undefined ? t("routes.faultHint") : fill(t("routes.faultHint"), { reason: fault.message }),
+									},
+									t("routes.fault"),
+								),
+							)
+						: isCursor
+						? h(
+								"span",
+								{ className: "gw-hop-side" },
+								h(
+									"span",
+									{ className: "gw-cursor-mark", title: movedFrom === null ? t("routes.cursorHint") : fill(t("routes.cursorMovedHint"), { from: movedFrom }) },
+									t("routes.cursor"),
+								),
 							)
 						: h(
 								"span",
 								{ className: "gw-hop-side" },
-								h("span", { className: `gw-badge ${index === 0 ? "is-brand" : "is-idle"}` }, index === 0 ? t("routes.primary") : t("routes.fallback")),
+								index === 0
+									? h("span", { className: "gw-badge is-brand" }, t("routes.primary"))
+									: h("span", { className: "gw-badge is-idle" }, t("routes.fallback")),
 							),
 				);
 			};
@@ -2329,16 +2574,24 @@ window.__ModuleLoader__.load({
 								// be visible here and not only on the page behind the modal.
 								isUnavailable(id)
 									? h("span", { className: "gw-badge is-gone", title: t("routes.unavailableHint") }, t("routes.unavailable"))
-									: null,
+									: faultFor(id) !== undefined
+										? h(
+												"span",
+												{ className: "gw-badge is-bad", title: fill(t("routes.faultHint"), { reason: faultFor(id).message ?? "" }) },
+												t("routes.fault"),
+											)
+										: null,
 							),
 							h(
 								"span",
 								{ className: "gw-chain-meta" },
 								isUnavailable(id)
 									? t("routes.unavailableMeta")
-									: index === 0
-										? t("routes.primaryHint")
-										: fill(t("routes.fallbackHint"), { index: index + 1 }),
+									: faultFor(id) !== undefined
+										? faultFor(id).reason ?? t("routes.faultMeta")
+										: index === 0
+											? t("routes.primaryHint")
+											: fill(t("routes.fallbackHint"), { index: index + 1 }),
 							),
 						),
 						h(
@@ -2597,7 +2850,7 @@ window.__ModuleLoader__.load({
 			};
 
 			const routesPanel = () => {
-				const healthy = coolingCount === 0;
+				const healthy = movedCount === 0 && faultCount === 0;
 				return h(
 					"div",
 					{ className: `gw-panel ${tab === "routes" ? "is-active" : ""}`, key: "routes" },
@@ -2618,10 +2871,12 @@ window.__ModuleLoader__.load({
 								{ className: "gw-sec-side" },
 								h(
 									"span",
-									{ className: `gw-badge ${healthy ? "is-ok" : "is-warn"}` },
-									healthy
-										? t("routes.healthy")
-										: fill(t("routes.bench"), { count: coolingCount }),
+									{ className: `gw-badge ${faultCount > 0 ? "is-bad" : healthy ? "is-ok" : "is-brand"}` },
+									faultCount > 0
+										? fill(t("routes.faultCount"), { count: faultCount })
+										: healthy
+											? t("routes.healthy")
+											: fill(t("routes.moved"), { count: movedCount }),
 								),
 								h(
 									"button",
@@ -2652,17 +2907,28 @@ window.__ModuleLoader__.load({
 										"div",
 										{ className: "gw-tbody" },
 										aliasRows.map((row) => {
-											const benched = row.targets.filter((target) => coolingFor(target) !== undefined).length;
+											const cursor = cursorFor(row.alias);
 											const gone = row.targets.filter((target) => isUnavailable(target)).length;
-											// A dead target outranks a cooling one: cooling recovers by
-											// itself, a stale row needs the user to edit it.
-											const tone = gone > 0 ? "is-bad" : benched === 0 ? "is-ok" : "is-warn";
+											// A target that just refused is the row's most important
+											// fact: it is the one costing a round-trip on every
+											// request, and the only one the user can fix.
+											const broken = row.targets.filter((target) => faultFor(target) !== undefined).length;
+											// A dead target outranks a moved cursor: a cursor is
+											// normal operation, a stale row needs the user to edit it.
+											const moved = cursor !== undefined;
+											const tone = gone > 0 || broken > 0 ? "is-bad" : moved ? "is-brand" : "is-ok";
 											const health =
 												gone > 0
 													? fill(t("routes.goneCount"), { count: gone })
-													: benched === 0
-														? t("routes.healthy")
-														: fill(t("routes.bench"), { count: benched });
+													: broken > 0
+														? fill(t("routes.faultCount"), { count: broken })
+														: moved
+															? t("routes.movedOne")
+															: t("routes.healthy");
+											// The cell is 106px wide, so the target the cursor moved to
+											// lives in the tooltip: naming it inline wrapped the row.
+											const healthHint =
+												moved && cursor.next !== undefined ? fill(t("routes.movedOneHint"), { target: cursor.next }) : undefined;
 											return h(
 												"div",
 												{ className: "gw-trow gw-grid-route", key: row.alias },
@@ -2672,11 +2938,15 @@ window.__ModuleLoader__.load({
 													h("code", { title: row.alias }, row.alias),
 													h("small", null, fill(t("routes.count"), { count: row.targets.length })),
 												),
-												h("div", { className: "gw-chain" }, ...row.targets.map((target, index) => routeHop(target, index))),
+												h(
+													"div",
+													{ className: "gw-chain" },
+													...row.targets.map((target, index) => routeHop(target, index, cursor)),
+												),
 												h(
 													"div",
 													{ className: "gw-tcell" },
-													h("span", { className: `gw-badge ${tone}` }, health),
+													h("span", { className: `gw-badge ${tone}`, title: healthHint }, health),
 												),
 												h(
 													"div",
@@ -2706,6 +2976,56 @@ window.__ModuleLoader__.load({
 					// panel rather than inside it: a dialog inside a tab would vanish
 					// the moment the tab changed.
 					routeEditor(),
+				);
+			};
+
+			/**
+			 * A failed start, said in a way that points at the next move.
+			 *
+			 * The host sends one sentence, and it can be long because it carries
+			 * the fix. Splitting it keeps the first clause (what went wrong) as the
+			 * headline and the rest as the advice, so the panel reads as a diagnosis
+			 * with a next step rather than a wall of text. The other provider is
+			 * always offered as the way out, because "ngrok is not installed" must
+			 * not read as "this tab cannot work".
+			 */
+			const tunnelFailure = (message, provider) => {
+				const other = provider === "ngrok" ? "cloudflared" : "ngrok";
+				const credential = tunnel?.needsCredential === true;
+				const cut = message.search(/[.;]\s/);
+				const headline = cut > 0 ? message.slice(0, cut + 1) : message;
+				const advice = cut > 0 ? message.slice(cut + 1).trim() : "";
+				return h(
+					"div",
+					{ className: "gw-fail" },
+					h(
+						"div",
+						{ className: "gw-fail-head" },
+						h("span", { className: "gw-fail-ico" }, "!"),
+						h("b", null, headline),
+					),
+					advice.length > 0 ? h("p", { className: "gw-fail-body" }, advice) : null,
+					h(
+						"div",
+						{ className: "gw-fail-actions" },
+						credential
+							? h(
+									"a",
+									{ className: "gw-btn is-sm", href: tunnel?.tokenUrl, target: "_blank", rel: "noreferrer noopener" },
+									t("page.tunnelToken"),
+								)
+							: null,
+						h(
+							"button",
+							{
+								type: "button",
+								className: "gw-btn is-sm",
+								disabled: busyTunnel,
+								onClick: () => toggleTunnel("start", other),
+							},
+							fill(t("tunnel.tryOther"), { provider: other }),
+						),
+					),
 				);
 			};
 
@@ -2821,7 +3141,7 @@ window.__ModuleLoader__.load({
 							),
 						),
 						tunnel?.error !== null && tunnel?.error !== undefined
-							? h("div", { className: "gw-notice is-bad" }, tunnel.error)
+							? tunnelFailure(tunnel.error, tunnel?.provider ?? chosen)
 							: null,
 						noticeFor("tunnel"),
 					),
@@ -3015,6 +3335,15 @@ window.__ModuleLoader__.load({
 						h("div", { className: "gw-kv-copy" }, h("b", null, title), h("small", null, sub)),
 						h("div", { className: "gw-kv-ctl" }, control),
 					);
+				// The host reports every live key; an older host that only knows
+				// `apiKey` still renders as a single row, so the page degrades to the
+				// previous behaviour instead of showing an empty card.
+				const keyRows =
+					Array.isArray(status?.keys) && status.keys.length > 0
+						? status.keys
+						: typeof status?.apiKey === "string"
+							? [{ id: "primary", key: status.apiKey, label: "" }]
+							: [];
 				return h(
 					"div",
 					{ className: `gw-panel ${tab === "settings" ? "is-active" : ""}`, key: "settings" },
@@ -3075,37 +3404,120 @@ window.__ModuleLoader__.load({
 							"div",
 							{ className: "gw-card" },
 							h("div", { className: "gw-sec-title", style: { fontSize: "12.5px" } }, t("settings.key")),
-							h("p", { className: "gw-sec-sub" }, t("settings.keySub")),
-							kv(
-								"key",
-								t("page.apiKey"),
-								typeof status?.settingsFile === "string"
-									? `${t("page.keyFile")} ${status.settingsFile}`
-									: t("settings.keySub"),
-								h(
-									"span",
-									{ className: "gw-kv-ctl" },
+							h("p", { className: "gw-sec-sub" }, t("page.keysSub")),
+							h(
+								"div",
+								{ className: "gw-keys" },
+								keyRows.map((entry, index) =>
 									h(
-										"code",
-										{ className: "gw-kv-value", title: status?.apiKey ?? "" },
-										revealed ? (status?.apiKey ?? "—") : mask(status?.apiKey),
-									),
-									h(
-										"button",
-										{ type: "button", className: "gw-btn is-sm", onClick: () => setRevealed((value) => !value) },
-										revealed ? t("page.hide") : t("page.reveal"),
-									),
-									h(
-										"button",
-										{ type: "button", className: "gw-btn is-sm", onClick: () => copy("key", status?.apiKey ?? "") },
-										copied === "key" ? t("page.copied") : t("page.copy"),
-									),
-									h(
-										"button",
-										{ type: "button", className: `gw-btn is-sm ${confirmKey ? "is-danger" : ""}`, onClick: rotateKey },
-										confirmKey ? t("page.regenerateConfirm") : t("page.regenerate"),
+										"div",
+										{ className: "gw-key", key: entry.id },
+										h(
+											"div",
+											{ className: "gw-key-main" },
+											h(
+												"code",
+												{ className: "gw-key-value", title: entry.key },
+												revealed ? entry.key : mask(entry.key),
+											),
+											index === 0
+												? h("span", { className: "gw-badge is-brand" }, t("page.keyPrimary"))
+												: null,
+											editingLabel === entry.id
+												? h("input", {
+														className: "gw-input is-sm",
+														type: "text",
+														value: keyLabel,
+														placeholder: t("page.keyLabel"),
+														"aria-label": t("page.keyLabel"),
+														onChange: (event) => setKeyLabel(event.target.value),
+														onKeyDown: (event) => {
+															if (event.key === "Enter") {
+																keyAction("rename", { id: entry.id, label: keyLabel });
+																setEditingLabel(null);
+															}
+															if (event.key === "Escape") setEditingLabel(null);
+														},
+													})
+												: entry.label
+													? h("small", { className: "gw-key-label" }, entry.label)
+													: null,
+										),
+										h(
+											"div",
+											{ className: "gw-key-actions" },
+											h(
+												"button",
+												{ type: "button", className: "gw-btn is-sm", onClick: () => copy(`key:${entry.id}`, entry.key) },
+												copied === `key:${entry.id}` ? t("page.copied") : t("page.copy"),
+											),
+											h(
+												"button",
+												{
+													type: "button",
+													className: "gw-btn is-sm",
+													onClick: () => {
+														if (editingLabel === entry.id) {
+															setEditingLabel(null);
+															return;
+														}
+														setKeyLabel(entry.label ?? "");
+														setEditingLabel(entry.id);
+													},
+												},
+												editingLabel === entry.id ? t("routes.cancel") : t("page.renameKey"),
+											),
+											keyRows.length > 1
+												? h(
+														"button",
+														{
+															type: "button",
+															className: "gw-btn is-sm is-danger",
+															onClick: () => keyAction("remove", { id: entry.id }),
+														},
+														t("page.removeKey"),
+													)
+												: null,
+										),
 									),
 								),
+							),
+							h(
+								"div",
+								{ className: "gw-key-add" },
+								h("input", {
+									className: "gw-input",
+									type: "text",
+									value: keyLabel,
+									placeholder: t("page.keyLabel"),
+									"aria-label": t("page.keyLabel"),
+									onChange: (event) => setKeyLabel(event.target.value),
+									onKeyDown: (event) => {
+										if (event.key === "Enter") keyAction("add", { label: keyLabel });
+									},
+								}),
+								h(
+									"button",
+									{ type: "button", className: "gw-btn is-primary", onClick: () => keyAction("add", { label: keyLabel }) },
+									t("page.addKey"),
+								),
+							),
+							h(
+								"div",
+								{ className: "gw-key-foot" },
+								h(
+									"button",
+									{ type: "button", className: "gw-btn is-sm", onClick: () => setRevealed((value) => !value) },
+									revealed ? t("page.hide") : t("page.reveal"),
+								),
+								h(
+									"button",
+									{ type: "button", className: `gw-btn is-sm ${confirmKey ? "is-danger" : ""}`, onClick: () => keyAction("regenerate") },
+									confirmKey ? t("page.regenerateConfirm") : t("page.regenerate"),
+								),
+								typeof status?.settingsFile === "string"
+									? h("small", { className: "gw-key-path" }, `${t("page.keyFile")} ${status.settingsFile}`)
+									: null,
 							),
 							noticeFor("key"),
 						),
@@ -3178,14 +3590,14 @@ window.__ModuleLoader__.load({
 						role: "tab",
 					},
 					id === "routes"
-						? h("span", { className: `gw-tab-dot ${coolingCount > 0 ? "is-warn" : routeCount > 0 ? "is-ok" : ""}` })
+						? h("span", { className: `gw-tab-dot ${faultCount > 0 ? "is-bad" : routeCount > 0 ? "is-ok" : ""}` })
 						: null,
 					id === "tunnel"
 						? h("span", { className: `gw-tab-dot ${tunnelStatus === "running" ? "is-ok" : tunnelStatus === "failed" ? "is-bad" : ""}` })
 						: null,
 					t(`tab.${id}`),
 					id === "routes" && routeCount > 0
-						? h("span", { className: `gw-tab-n ${coolingCount > 0 ? "is-warn" : ""}` }, String(routeCount))
+						? h("span", { className: "gw-tab-n" }, String(routeCount))
 						: null,
 				);
 

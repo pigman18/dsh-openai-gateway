@@ -3,8 +3,8 @@
  *
  * This is the shape a relay (one-api and friends) calls "channel failover": the
  * caller names one model, the gateway tries its targets in order, and a target
- * that reports "not right now" is benched for a cooldown instead of being
- * retried on every request.
+ * that reports "not right now" is skipped from then on — the route's cursor
+ * moves past it and the next request starts one further along.
  *
  * The fake `llm` here scripts each provider's answer, so every check asserts a
  * fact about what the gateway did — which provider it reached, how many times,
@@ -39,7 +39,7 @@ function freePort() {
  *
  * `plan` maps `provider/model` to either `'ok'` or a failure code. Every call is
  * recorded, so a check can prove the gateway stopped trying after a success and
- * did not touch a benched target.
+ * did not touch a target the cursor has moved past.
  */
 function fakeLlm(plan) {
   const calls = []
@@ -51,6 +51,9 @@ function fakeLlm(plan) {
   }
   return {
     calls,
+    // Exposed so a check can heal a target mid-run and prove the gateway
+    // notices: the plan is read at call time, not at boot.
+    plan,
     listProviders: () => Object.keys(models).map((id) => ({ id, name: id })),
     listModels: async (provider) => models[provider] ?? [],
     prepareCall: async (config) => {
@@ -81,6 +84,12 @@ function fakeCtx(llm) {
   return {
     llm,
     webRoutes,
+    // The tests that send images need a store; a stand-in that accepts anything
+    // and hands back a stable ref is enough to exercise the routing order.
+    attachments: {
+      saveImages: async (images) => images.map(() => 'sha256:test'),
+      saveFile: async () => 'sha256:test',
+    },
     logger: { info() {}, warn() {} },
     effect: (factory) => {
       disposers.push(factory())
@@ -93,7 +102,13 @@ function fakeCtx(llm) {
               return () => {}
             },
           }
-        : undefined,
+        : key === 'attachments'
+          ? {
+              // A stand-in store: accept anything, hand back a stable ref.
+              saveImages: async (images) => images.map(() => 'sha256:test'),
+              saveFile: async () => 'sha256:test',
+            }
+          : undefined,
     on: () => {},
     disposeAll: () => {
       for (const dispose of disposers) {
@@ -340,7 +355,7 @@ await check('a failure that is the caller\'s own fault does not walk the list', 
   }
 })
 
-await check('a benched target is skipped on the next request', async () => {
+await check('a refused target is skipped on the next request', async () => {
   const app = await boot({ 'a/one': 'QUOTA', 'b/two': 'ok' }, ['a/one', 'b/two'])
   try {
     await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
@@ -359,47 +374,90 @@ await check('a benched target is skipped on the next request', async () => {
   }
 })
 
-await check('the status document reports which targets are benched, and why', async () => {
+await check('the status document reports where each route starts, and why', async () => {
   const app = await boot({ 'a/one': 'QUOTA', 'b/two': 'ok' }, ['a/one', 'b/two'])
   try {
     await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
     const status = await readStatus(app.ctx.webRoutes)
-    assert.equal(status.failover.cooldownMs, 5 * 60_000, 'the cooldown is not the documented five minutes')
-    const benched = status.failover.cooling
-    assert.equal(benched.length, 1, `expected exactly one benched target, got ${JSON.stringify(benched)}`)
-    assert.equal(benched[0].target, 'a/one')
-    assert.equal(benched[0].code, 'QUOTA', 'the reason was not recorded')
-    assert.ok(
-      benched[0].remainingMs > 4 * 60_000 && benched[0].remainingMs <= 5 * 60_000,
-      `the remaining cooldown is implausible: ${benched[0].remainingMs}`,
-    )
+    const routes = status.rotation.routes
+    assert.equal(routes.length, 1, `expected one rotated route, got ${JSON.stringify(routes)}`)
+    assert.equal(routes[0].alias, 'flash')
+    assert.equal(routes[0].next, 'b/two', 'the cursor did not move past the refused target')
+    assert.equal(routes[0].movedFrom, 'a/one', 'the target that moved the cursor was not recorded')
+    assert.equal(routes[0].code, 'QUOTA', 'the reason was not recorded')
   } finally {
     app.stop()
   }
 })
 
-await check('a healthy target is not reported as benched', async () => {
+await check('a healthy route is not reported as rotated', async () => {
   const app = await boot({ 'a/one': 'ok' }, ['a/one'])
   try {
     await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
     const status = await readStatus(app.ctx.webRoutes)
-    assert.deepEqual(status.failover.cooling, [], 'a working target was reported as benched')
+    assert.deepEqual(status.rotation.routes, [], 'a working target moved the cursor')
   } finally {
     app.stop()
   }
 })
 
-await check('when every target is benched the request still goes somewhere real', async () => {
+await check('a target that refused is reported as faulty, with a reason', async () => {
+  const app = await boot({ 'a/one': 'QUOTA', 'b/two': 'ok' }, ['a/one', 'b/two'])
+  try {
+    await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    const status = await readStatus(app.ctx.webRoutes)
+    const faults = status.faults
+    assert.ok(faults !== null && typeof faults === 'object', `no fault map in the status document: ${JSON.stringify(status)}`)
+    const fault = faults['a/one']
+    assert.ok(fault !== undefined, `the refused target is not reported: ${JSON.stringify(faults)}`)
+    assert.equal(fault.code, 'QUOTA', 'the failure code was not kept')
+    assert.equal(fault.failover, true, 'a quota refusal is a failover, so the target is being skipped')
+    /* The reason is what the page prints next to the red badge, so it has to be
+       the adapter's own words and short enough for one line. */
+    assert.ok(typeof fault.reason === 'string' && fault.reason.length > 0, 'no human-readable reason')
+    assert.ok(!fault.reason.includes('\n'), 'the reason should be one line')
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a target that starts working again loses its fault', async () => {
+  const app = await boot({ 'a/one': 'QUOTA', 'b/two': 'ok' }, ['a/one', 'b/two'])
+  try {
+    await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    const before = await readStatus(app.ctx.webRoutes)
+    assert.ok(before.faults['a/one'] !== undefined, 'the refusal was not recorded in the first place')
+
+    /* Swap which target is broken: the cursor now starts at b/two, so the next
+       request fails there and lands on a/one, which is healthy again. Serving a
+       target is what clears its fault — nothing polls in the background. */
+    app.llm.plan['a/one'] = 'ok'
+    app.llm.plan['b/two'] = 'QUOTA'
+    const second = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(second.status, 200, second.text.slice(0, 200))
+
+    const after = await readStatus(app.ctx.webRoutes)
+    assert.equal(after.faults['a/one'], undefined, `a recovered target is still flagged: ${JSON.stringify(after.faults)}`)
+    assert.ok(after.faults['b/two'] !== undefined, 'the newly refused target was not flagged')
+  } finally {
+    app.stop()
+  }
+})
+
+await check('when every target refuses, the request still reaches one of them', async () => {
   const app = await boot({ 'a/one': 'QUOTA', 'b/two': 'QUOTA' }, ['a/one', 'b/two'])
   try {
     await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
     const status = await readStatus(app.ctx.webRoutes)
-    assert.equal(status.failover.cooling.length, 2, 'both targets should be benched after failing')
+    assert.equal(status.rotation.routes.length, 1, 'the route should have a cursor after a full lap')
+    // A full lap wraps: the head is where the next request starts again, so a
+    // chain of refusals costs one lap per request rather than sticking on one.
+    assert.equal(status.rotation.routes[0].next, 'a/one', 'the cursor did not wrap to the head')
 
     app.llm.calls.length = 0
     const third = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
     assert.equal(third.status, 429, `expected a real upstream refusal, got ${third.status}`)
-    assert.ok(app.llm.calls.length > 0, 'a fully benched alias answered without contacting any target')
+    assert.deepEqual(app.llm.calls, ['a/one', 'b/two'], 'the whole chain was not tried exactly once')
   } finally {
     app.stop()
   }
@@ -569,6 +627,79 @@ await check('a quota refusal carrying only text is still failed over', async () 
   }
 })
 
+await check('a target whose provider has no credential is stepped over', async () => {
+  /* The reported failure, reproduced. A provider listed without an `apiKeyEnv`
+     makes the pi-ai adapter refuse before any network call:
+
+        PI_AI_ERROR  No API key for provider: opencode-zen
+
+     No `status`, and a `code` (`PI_AI_ERROR`) that names the adapter rather than
+     the problem, so neither the code set nor the status set nor the quota text
+     matched: the nine-target route answered 502 on its first target while eight
+     healthy ones sat behind it. A missing credential is entirely the target's
+     own problem, so the route has to walk past it. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { code: 'PI_AI_ERROR', message: 'No API key for provider: opencode-zen' },
+          },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `an unconfigured target killed the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:b/two'), 'the healthy target was never tried')
+    assert.deepEqual(app.llm.calls, ['a/one', 'b/two'], `wrong target order: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a request that walked past a dead target is recorded as answered', async () => {
+  /* The record is what the dashboard shows and what "it dropped again" is
+     answered from, so it must describe the request, not its first attempt. A
+     target that refuses writes its failure onto the trace; when a later target
+     answers, that failure is stale. Left in place, a request that succeeded on
+     its fourth target showed up as an error naming the first target's problem. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { code: 'PI_AI_ERROR', message: 'No API key for provider: opencode-zen' },
+          },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `the route did not recover: ${res.text.slice(0, 300)}`)
+    const trace = app.state.recent[0]
+    assert.equal(trace.outcome, 'ok', `a served request was recorded as ${trace.outcome}: ${trace.code}`)
+    assert.equal(trace.code, undefined, `the dead target's code was left on a served request: ${trace.code}`)
+    assert.equal(trace.message, undefined, `the dead target's message was left on a served request: ${trace.message}`)
+    assert.equal(trace.provider, 'b', `the record names the wrong target: ${trace.provider}`)
+    assert.ok(trace.attempts >= 2, `the record lost the attempt count: ${trace.attempts}`)
+  } finally {
+    app.stop()
+  }
+})
+
 await check('a plain text error that is not a quota failure still stops', async () => {
   /* The widening must not turn every unlabelled error into a failover. A bare
      "the model refused" is not about the account, so the next target would
@@ -659,8 +790,8 @@ await check('a target whose provider was renamed does not kill the route', async
   }
 })
 
-await check('a renamed provider is benched rather than retried every request', async () => {
-  // The stale row costs one round-trip, then sits out like any other dead target.
+await check('a renamed provider is skipped rather than retried every request', async () => {
+  // The stale row costs one round-trip, then the cursor moves past it.
   const app = await bootCustom({ flash: ['gone/one', 'b/two'] }, (original) => async (config) => {
     if (`${config.provider}/${config.model}` !== 'gone/one') return original(config)
     return {
@@ -723,6 +854,65 @@ await check('a fully live route reports nothing unavailable', async () => {
     const status = await readStatus(app.ctx.webRoutes)
     const row = status.aliases.find((entry) => entry.alias === 'flash')
     assert.deepEqual(row.unavailable, [], `a healthy route was flagged: ${JSON.stringify(row.unavailable)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a request with images is routed to a vision-capable target first', async () => {
+  /* A text-only target handed an image does not fail — it answers with the
+     omission placeholder, which reads like a refusal. The known-vision target
+     has to move to the front so the first try can actually see the image. */
+  const app = await boot({ 'b/two': 'ok' }, ['a/one', 'b/two'])
+  try {
+    // Teach the catalogue that b/two's provider advertises a vision model.
+    const original = app.llm.prepareCall
+    app.llm.prepareCall = original
+    app.state.catalog = {
+      at: Date.now(),
+      entries: [
+        { provider: 'a', model: { id: 'one', name: 'text-model' } },
+        { provider: 'b', model: { id: 'two', name: 'Gemini Flash' } },
+      ],
+    }
+    app.llm.calls.length = 0
+
+    const image = { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } }
+    const res = await post(app.port, app.state.apiKey, {
+      model: 'flash',
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'what is this' }, image] }],
+    })
+    assert.equal(res.status, 200, res.text.slice(0, 240))
+    assert.ok(res.text.includes('served-by:b/two'), 'the vision target did not serve')
+    assert.deepEqual(
+      app.llm.calls,
+      ['b/two'],
+      `the vision target was not tried first: ${JSON.stringify(app.llm.calls)}`,
+    )
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a text-only request keeps the caller’s target order', async () => {
+  const app = await boot({ 'a/one': 'ok' }, ['a/one', 'b/two'])
+  try {
+    app.state.catalog = {
+      at: Date.now(),
+      entries: [{ provider: 'b', model: { id: 'two', name: 'Gemini Flash' } }],
+    }
+    app.llm.calls.length = 0
+
+    const res = await post(app.port, app.state.apiKey, {
+      model: 'flash',
+      messages: [{ role: 'user', content: 'plain text question' }],
+    })
+    assert.equal(res.status, 200, res.text.slice(0, 240))
+    assert.deepEqual(
+      app.llm.calls,
+      ['a/one'],
+      `a text request was reordered: ${JSON.stringify(app.llm.calls)}`,
+    )
   } finally {
     app.stop()
   }
