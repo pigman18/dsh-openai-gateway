@@ -199,7 +199,8 @@ try {
 
   await check('the alias table is written to the settings file', async () => {
     const persisted = JSON.parse(readFileSync(gateway.settingsFile, 'utf8'))
-    assert.deepEqual(persisted.aliases, { 'gpt-4o': 'provider-a/only-a' })
+    // The stored form is the list of targets, in the order they are tried.
+    assert.deepEqual(persisted.aliases, { 'gpt-4o': ['provider-a/only-a'] })
     assert.equal(persisted.port, gateway.state.store.port)
   })
 } finally {
@@ -218,13 +219,13 @@ await check('the alias table is read back on the next boot', async () => {
 
     // Only the file can supply the alias on the second boot: no bundle config.
     const seeded = JSON.parse(readFileSync(join(home, 'openai-gateway', 'settings.json'), 'utf8'))
-    assert.deepEqual(seeded.aliases, { 'gpt-4o': 'provider-a/only-a' })
+    assert.deepEqual(seeded.aliases, { 'gpt-4o': ['provider-a/only-a'] })
 
     const ctx2 = fakeCtx(fakeLlm())
     const second = apply(ctx2, { port: port1 })
     await waitForPort(second)
     try {
-      assert.deepEqual(second.store.aliases, { 'gpt-4o': 'provider-a/only-a' })
+      assert.deepEqual(second.store.aliases, { 'gpt-4o': ['provider-a/only-a'] })
       const res = await request(port1, {
         method: 'POST',
         path: '/v1/chat/completions',

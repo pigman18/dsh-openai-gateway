@@ -26,7 +26,7 @@
 - **一个入口，全部模型** —— `/v1/models` 列出所有 provider 的所有模型，ID 为 `provider/model`（如 `workbuddy/deepseek-v4.1-flash`、`opencode2dsh/deepseek-v4.1-flash-free`、`local/qwen3.5:4b`）。当某个裸 ID 只被一个 provider 提供时也接受；多个 provider 撞名时明确报错并列出候选，不做猜测。
 - **端口固化** —— 网关自己监听 `127.0.0.1:8787`，与界面端口无关（界面端口每次启动都可能变，网关的地址不会）。端口被占用时自动落到系统分配的随机端口继续服务，页面会标明「随机（8787 被占用）」，而不是起不来。
 - **密钥固化** —— 首次启动生成 `sk-dsh-…` 并写入 `$DSH_HOME/openai-gateway/settings.json`（0600），跨重启不变；页面上的 **生成** 按钮可换新（两步确认，旧钥立即失效）。旧版本的 `api-key` 文件会被自动迁移，已配置的客户端不受影响。
-- **侧边栏模型网关仪表盘** —— 顶部一条吸顶栏显示运行状态与刷新；下面五块指标（请求数 / 失败数、模型数与 provider 数、令牌用量、流量、运行时长），再往下是两列卡片：地址与端口、隧道、密钥、模型别名，然后是**可搜索**的模型目录（按 provider 分组折叠，支持按 ID / 名称 / provider 过滤），以及最近请求表（时间、模型、成功或失败码、令牌进→出、耗时）。所有颜色、边框、圆角、阴影、字号都取自宿主主题 token，亮色与暗色主题都跟随，不写死任何色值。
+- **侧边栏模型网关仪表盘** —— 五个 tab：**概览**（吸顶栏显示运行状态与刷新，五块指标：请求数 / 失败数、模型数与 provider 数、令牌用量、流量、运行时长，最近请求表）、**路由**（每条路由的尝试顺序、健康度、冷却倒计时，以及弹窗式选择器增删）、**隧道**（大号公网地址、启停、方式选择、缺凭据时的注册入口）、**目录**（**可搜索**的模型清单，按 provider 分组折叠，按 ID / 名称 / provider 过滤）、**设置**（对外 / 本地地址、密钥、端口、curl 示例）。所有颜色、边框、圆角、阴影、字号都取自宿主主题 token，亮色与暗色主题都跟随，不写死任何色值。
 - **流式与非流式都支持** —— `"stream": true` 返回标准 SSE（`data: …` 逐帧，`[DONE]` 收尾），非流式返回完整 `chat.completion`。
 - **工具调用** —— `tools` 正常转发，结果以 `tool_calls` 返回，`arguments` 的分片会被拼装完整，`finish_reason` 为 `tool_calls`；`tool` 消息按其 `tool_call_id` 回到对应调用。assistant 侧漏了 `id` 时会按结果的 id 对齐，而不是另造一个（上游对「没有结果的调用」只会回空回复）。
 - **图片与文件** —— `image_url` / `input_image` 与 `file` / `input_file` 都支持。图片：`data:` URL 直接解码，`http(s)` 图片由网关抓取（上限 25 MiB），然后**存进宿主的附件库**（`ctx.attachments`），模型拿到的是持久化的图片块而不是只有调用方够得着的 URL；一条 user 消息里的多张图按一条批次入库，附件的张数与字节上限照旧生效，模型不支持图片时由宿主降级成一行说明文字。文件：**能当文本读的直接内联成文本**（`[attached file: name]` + 内容，2 MiB 以内、UTF-8 且无 NUL 字节），其余（PDF、图片、压缩包等）存进附件库并作为 `file` 块交给模型。没有附件服务的 profile 会明确回 400，而不是悄悄只发文本。
@@ -174,12 +174,39 @@ Cursor 的自定义 Base URL 不接受 `localhost` / `127.0.0.1`，必须是一�
         deepseek-v4.1-flash: opencode2dsh/deepseek-v4.1-flash-free   # 撞名裸 ID 也能这样消歧
 ```
 
-也可以在页面的「模型别名」卡片里增删并保存（写回 `settings.json`，重启仍在）。规则：
+也可以在页面的「路由」tab 里增删并保存（写回 `settings.json`，重启仍在）。点【添加路由】或某行的【编辑】打开选择器：左边按 provider 分组、可搜索（同时匹配 id / 显示名 / provider），勾选顺序就是兜底顺序；右边用 ↑ ↓ 或拖拽调整。已被别的路由占用的模型会标出占用者。规则：
 
 - 目标必须是 `provider/model`；没有 provider 前缀的目标会被丢弃，不会留下一个必然 404 的别名。
 - 别名先于目录解析，所以它**能压过撞名的裸 ID** —— `deepseek-v4.1-flash` 同时被三个 provider 提供时，一条别名就把它指到一个确定的去处。
 - 别名会出现在 `/v1/models` 里（带 `alias_of` 字段），客户端的模型下拉框能直接看到。
 - 响应里的 `model` 字段回显**调用方发来的名字**，而不是上游真实 ID。
+
+### 多目标故障转移
+
+一个别名可以按顺序写多个目标，前一个不可用时自动换下一个：
+
+```yaml
+- insert:
+    - id: dsh-openai-gateway
+      name: dsh-openai-gateway
+      aliases:
+        deepseek-flash:
+          - our-free-model/deepseek-v4.1-flash-free
+          - trae/deepseek-v4.1-flash
+          - trae-global/deepseek-v4.1-flash
+          - workbuddy/deepseek-v4.1-flash
+          - qoder-cn/DeepSeek-Flash
+```
+
+页面上对应的是多行文本框，每行一个目标。行为：
+
+- **什么算「不可用」**：额度耗尽（`QUOTA` / `QUOTA_EXCEEDED`）、限流（`RATE_LIMIT`）、超时（`TIMEOUT`）、连不上（`TRANSPORT`）、上游 5xx（`SERVER`）、空回复（`EMPTY_RESPONSE`）。
+- **什么不算**：`INVALID_REQUEST`、`UNSUPPORTED_*`、`CONTEXT_WINDOW_EXCEEDED`。这些描述的是调用方自己的 payload，换任何目标都会被同样拒绝——走完整条链只会把必然失败的请求拖得更慢，所以直接拒绝。
+- **冷却 5 分钟**：失败的目标被记下，5 分钟内不再尝试，到期自动恢复。冷却表**只在内存里**，重启清空——重启正是额度可能已重置的时刻。
+- **不主动探活**：冷却期内不发任何请求。目标是靠「下一个真实请求需要它」重新上场的，因此**零额外额度消耗**。页面上被冷却的目标显示删除线，悬停可看原因与剩余时间。
+- **全部都在冷却时**照样发请求，挑冷却最早结束的那个。调用方宁可拿到真实的 402，也不愿收到一个没有客户端认识的「都在冷却中」。
+- **只在响应提交前切换**。流式响应一旦发出第一个 delta，答案已交付一部分，重放会重复或悄悄换掉模型；此时直接报错。
+- 同一个目标在一个别名里写两次会被去重——同一端点试两次不可能第二次成功，只会让等待翻倍。
 
 ## 接口
 
@@ -187,7 +214,7 @@ Cursor 的自定义 Base URL 不接受 `localhost` / `127.0.0.1`，必须是一�
 
 | 方法 | 路径 | 用途 |
 | --- | --- | --- |
-| `GET` | `/v1/models` | 所有 provider 的所有模型 + 全部别名（`?refresh=1` 跳过 60 秒缓存） |
+| `GET` | `/v1/models` | 所有 provider 的所有模型 + 全部别名（多目标别名带 `alias_of` 与 `alias_targets`；`?refresh=1` 跳过 60 秒缓存） |
 | `GET` | `/v1/models/<provider>/<model>` | 单个模型；`/v1/models/<别名>` 也返回该别名的 `alias_of` |
 | `POST` | `/v1/chat/completions` | 对话补全，流式或非流式；`model` 可以是 `provider/model`、别名、或不撞名的裸 ID |
 | `POST` | `/v1/completions` | 同一处理器，兼容只认旧路径的客户端 |
@@ -219,7 +246,7 @@ OpenAI 客户端 ──▶ http://127.0.0.1:8787/v1 ──▶ ctx.llm ──▶ 
 
 ```
 $DSH_HOME/openai-gateway/settings.json        # 默认 ~/.dsh/openai-gateway/settings.json
-{ "port": 8787, "apiKey": "sk-dsh-…", "aliases": { "gpt-4o": "provider/model" } }
+{ "port": 8787, "apiKey": "sk-dsh-…", "aliases": { "gpt-4o": ["provider/model"] } }
 ```
 
 - **端口**：优先 `8787`；启动时若已被占用，落到系统分配的随机端口继续服务（页面显示被占用的原端口）。页面改端口立即生效；改到被占用端口返回 409 且**继续在原端口服务**，不会把自己搞挂。
@@ -246,7 +273,7 @@ bundle 行上可选：
 | `maxMessages` | `0`（关） | 历史超过这么多条就丢弃最早的若干条，且保证保留部分从 `user` 开始 |
 | `publicBaseUrl` | 未设 | 对外地址（如 `https://name.ngrok-free.dev/v1`）。设置后页面的「对外地址」与 curl 示例改用它；不合法时忽略 |
 | `tunnel` | 未设 | `{ provider: "ngrok" \| "cloudflared", autostart: true }`，让插件自己拉起隧道进程 |
-| `aliases` | 未设 | `{ "客户端发来的名字": "provider/model" }`，优先于已存的别名表 |
+| `aliases` | 未设 | `{ "客户端发来的名字": ["provider/model", …] }`（也接受单个字符串），优先于已存的别名表 |
 
 ## 已知边界
 
@@ -256,9 +283,13 @@ bundle 行上可选：
 - **provider 注入的提示会原样透传**：例如账号池换号时上游返回的一行说明，会作为普通 assistant 文本出现，不会被网关吞掉或改写。
 - **没有 web server 的 profile（headless）**：没有页面与控制接口，但 `/v1/*` 仍按固定端口提供服务。
 - **长任务建议用 `stream: true`**：非流式请求在整段生成期间不会写出任何字节，任何读超时都会命中。
+- **故障转移只在响应提交前生效**：流式请求一旦发出第一个 delta，答案已经交付了一部分，此时失败直接报错而不是换目标重放——重放会让调用方看到重复内容，或者悄悄换了模型却不自知。
+- **冷却不持久化**：重启即清空。这是有意的，重启正是额度可能已重置的时刻；把「这个目标坏了」写进磁盘会让它活得比事实更久。
 - **超过 `silentFlushMs` 才失败的流式请求，错误以流内事件到达**：响应头一旦提交（为了保活），首字之前的失败只能写成 `data: {"error": …}` + `data: [DONE]`，不再有 HTTP 状态码。
 - **隧道是插件的子进程**：一个 ngrok free 账号只有一个 dev domain，同域第二个连接会被 `ERR_NGROK_334` 拒绝。手动开的 ngrok 要先关掉，插件才能接管；否则页面上的隧道状态会显示失败原因。
 - **`ERR_NGROK_3200` 表示域名离线**：dev domain 属于账号、地址稳定，但没有 ngrok 进程在跑时它就是离线的。要么开 `autostart`，要么在页面「隧道」卡片点启动。
+- **`ERR_NGROK_4018` 表示还没有 authtoken**：ngrok 需要账号和凭证才能开会话。页面上的隧道卡片会直接给出「注册 ngrok 账号」与「获取 authtoken」两个按钮；拿到 token 后跑 `ngrok config add-authtoken <token>`，再点启动。
+  - 注意 `ngrok config add-authtoken` 在配置文件里 `agent:` 后面为空时会**静默失败**：它照样打印 `Authtoken saved to configuration file`，但文件里没有 token。如果补了 token 仍然 4018，把配置文件改成只有一行 `version: "3"` 再重试。
 - **ngrok free 计划对浏览器 UA 插拦截页**：`ERR_NGROK_6024` 只影响用浏览器直接打开调试；Cursor 的 UA（实测 `cursor/0.48.9`）以及 `python-requests`、`OpenAI-Python`、`curl` 都直接放行。带 `Authorization` 头时也不会被拦。
 - 只绑定 `127.0.0.1`，不要把它转发到网络上；对外只经隧道公开 `/v1`。
 

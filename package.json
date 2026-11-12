@@ -1,6 +1,6 @@
 {
   "name": "dsh-openai-gateway",
-  "version": "1.3.0",
+  "version": "1.6.0",
   "displayName": "DSH OpenAI Gateway",
   "description": "Exposes every model of every provider configured in DeepSeek Harness as an OpenAI-compatible endpoint on a fixed loopback port, with a sidebar page for the base URL, the API key, the port, the public tunnel address, the model aliases and every model id.",
   "author": "pigman18",
@@ -28,7 +28,7 @@
   },
   "main": "index.js",
   "scripts": {
-    "test": "node tests/catalog-refresh.spec.mjs && node tests/resilience.spec.mjs && node tests/alias.spec.mjs && node tests/usage-totals.spec.mjs && node tests/style-tokens.spec.mjs && node tests/client-render.spec.mjs",
+    "test": "node tests/catalog-refresh.spec.mjs && node tests/resilience.spec.mjs && node tests/alias.spec.mjs && node tests/failover.spec.mjs && node tests/usage-totals.spec.mjs && node tests/style-tokens.spec.mjs && node tests/tunnel-help.spec.mjs && node tests/client-render.spec.mjs",
     "test:tunnel": "node tests/tunnel-live.spec.mjs"
   },
   "icon": "assets/icon-128.png",

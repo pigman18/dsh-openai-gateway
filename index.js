@@ -61,6 +61,33 @@ const SILENT_FLUSH_MS = 10_000
 const KEEPALIVE_MS = 15_000
 /** How many finished requests the status document keeps for diagnosis. */
 const RECENT_LIMIT = 20
+/**
+ * How long a failing alias target sits out before it is tried again.
+ *
+ * Nothing probes it in the meantime: a target earns its way back by being the
+ * next one a real request needs. Five minutes is long enough that a spent daily
+ * quota does not cost one failed round-trip per request, and short enough that
+ * a transient throttle heals without a restart.
+ */
+const FAILOVER_COOLDOWN_MS = 5 * 60_000
+/**
+ * Failures that mean "this target cannot serve right now, another one might":
+ * quota, throttling, timeouts, upstream faults and unreachable hosts.
+ *
+ * Deliberately not the request-shape codes (INVALID_REQUEST, UNSUPPORTED_*,
+ * CONTEXT_WINDOW_EXCEEDED). Those describe the caller's own payload, so every
+ * other target would reject it identically — walking the whole list would just
+ * multiply the latency of an answer that is never going to change.
+ */
+const FAILOVER_CODES = new Set([
+  'QUOTA',
+  'QUOTA_EXCEEDED',
+  'RATE_LIMIT',
+  'TIMEOUT',
+  'TRANSPORT',
+  'SERVER',
+  'EMPTY_RESPONSE',
+])
 const KEY_PREFIX = 'sk-dsh-'
 /** Service keys for the HTTP surface, newest name first. */
 const WEB_SERVER_KEYS = ['webServer', 'httpServer']
@@ -95,6 +122,16 @@ const TUNNEL_URL_PATTERNS = {
   ngrok: /https:\/\/[a-z0-9-]+\.ngrok-free\.(?:dev|app)/g,
   cloudflared: /https:\/\/[a-z0-9-]+\.trycloudflare\.com/g,
 }
+
+/** Where an ngrok account and its credential come from. */
+const NGROK_SIGNUP_URL = 'https://dashboard.ngrok.com/signup'
+const NGROK_TOKEN_URL = 'https://dashboard.ngrok.com/get-started/your-authtoken'
+/**
+ * ngrok's code for "this session is not authenticated". It is the one tunnel
+ * failure with an obvious next step, and the one users hit most often, because
+ * a free dev domain needs an account before a tunnel can claim it.
+ */
+const NGROK_NEEDS_CREDENTIAL = 'ERR_NGROK_4018'
 
 /** Cordis plugin name, surfaced in diagnostics. */
 export const name = PLUGIN_ID
@@ -202,6 +239,14 @@ export function apply(ctx, config) {
     // this plugin supervises only fills the gap while it is up.
     publicBaseUrl,
     tunnelConfig,
+    // Left empty in production so `startTunnel` spawns the real agent. A test
+    // sets it to run a stand-in script instead, which is the only substitution
+    // that works on Windows (see the comment in startTunnel).
+    tunnelCommand: undefined,
+    // Which alias targets are sitting out, and why. In memory only: a restart
+    // is exactly when a spent quota may have reset.
+    failover: new Map(),
+    failoverReason: new Map(),
     tunnel: {
       status: 'idle',
       provider: tunnelConfig.provider ?? null,
@@ -402,13 +447,16 @@ async function handleModels(ctx, state, ttl, url, res) {
       })),
       // Aliases are listed beside the real ids: a client that only knows the
       // name it was configured with (Cursor sends its own ids) discovers that
-      // the gateway honours it, instead of guessing from the error.
+      // the gateway honours it, instead of guessing from the error. A
+      // multi-target alias is advertised once, under its own name, with every
+      // target it may reach listed in order.
       ...aliasEntries(state).map((alias) => ({
         id: alias.alias,
         object: 'model',
         created: 0,
-        owned_by: alias.target.split('/')[0],
-        alias_of: alias.target,
+        owned_by: alias.targets[0].split('/')[0],
+        alias_of: alias.targets[0],
+        ...(alias.targets.length > 1 ? { alias_targets: [...alias.targets] } : {}),
       })),
     ],
   })
@@ -421,9 +469,15 @@ async function handleModel(ctx, state, ttl, rest, res) {
     entries.find((entry) => modelKey(entry) === wanted) ??
     entries.find((entry) => entry.model.id === wanted)
   if (found === undefined) {
-    const alias = state.store.aliases[wanted]
-    if (alias !== undefined) {
-      sendJson(res, 200, { id: wanted, object: 'model', created: 0, alias_of: alias })
+    const targets = aliasTargets(state, wanted)
+    if (targets !== undefined) {
+      sendJson(res, 200, {
+        id: wanted,
+        object: 'model',
+        created: 0,
+        alias_of: targets[0],
+        ...(targets.length > 1 ? { alias_targets: [...targets] } : {}),
+      })
       return
     }
     sendError(res, 404, 'invalid_request_error', `model ${wanted} is not registered`, {
@@ -482,8 +536,9 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
 
   try {
     let call
+    let route
     try {
-      const route = await resolveRoute(ctx, state, ttl, requested)
+      route = await resolveRoute(ctx, state, ttl, requested)
       if (route === undefined) {
         trace.outcome = 'rejected'
         trace.code = 'model_not_found'
@@ -527,8 +582,7 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
   trace.inputTokensEst = estimateInputTokens(call)
   call.trace = trace
 
-  if (call.wantsStream) await streamCompletion(ctx, state, res, call, controller.signal)
-  else await blockingCompletion(ctx, state, res, call, controller.signal)
+  await dispatchWithFailover(ctx, state, res, call, route, requested, trace, controller.signal)
   } catch (error) {
     trace.outcome = 'error'
     trace.code = error?.code
@@ -540,6 +594,111 @@ async function handleChat(ctx, state, ttl, req, res, bodyLimit) {
     foldOutBytes(res, state)
     recordRequest(ctx, state, trace)
   }
+}
+
+/* ------------------------------------------------------------ failover */
+
+/**
+ * Send one request to the best target the alias allows, moving on when a
+ * target reports that it cannot serve right now.
+ *
+ * The candidate list is the alias's own order, minus anything cooling down.
+ * When every target is cooling down the list is not empty: the least-recently
+ * failed one is used anyway. An alias whose whole list is benched still has to
+ * answer something, and a caller would rather get a real 402 from the best
+ * candidate than a synthetic "everything is cooling down" that no client knows
+ * how to read.
+ *
+ * Failover is only possible before the response commits. Once a stream has sent
+ * its first delta the answer is partly delivered, so replaying it on another
+ * target would either duplicate it or silently swap the model mid-answer; that
+ * failure is reported instead.
+ */
+async function dispatchWithFailover(ctx, state, res, call, route, requested, trace, signal) {
+  const targets = aliasPlan(state, requested)
+  const candidates = []
+
+  if (targets === undefined) {
+    candidates.push({ provider: route.provider, model: route.model })
+  } else {
+    for (const target of targets) {
+      const cut = target.indexOf('/')
+      if (cut <= 0) continue
+      const provider = target.slice(0, cut)
+      const model = target.slice(cut + 1)
+      if (model.length === 0) continue
+      if (!targetUsable(state, target)) continue
+      candidates.push({ provider, model, target })
+    }
+    if (candidates.length === 0) {
+      // Everything is benched: use the one whose cooldown expires first, so a
+      // spent quota still produces a real upstream answer for the caller.
+      let soonest
+      let soonestUntil = Number.POSITIVE_INFINITY
+      for (const target of targets) {
+        const until = state.failover.get(target) ?? 0
+        if (until < soonestUntil) {
+          soonestUntil = until
+          soonest = target
+        }
+      }
+      const cut = String(soonest).indexOf('/')
+      if (cut > 0) {
+        candidates.push({ provider: soonest.slice(0, cut), model: soonest.slice(cut + 1), target: soonest })
+      }
+    }
+  }
+
+  trace.attempts = 0
+  trace.targets = candidates.map((candidate) => `${candidate.provider}/${candidate.model}`)
+
+  let lastFailure
+  for (const [index, candidate] of candidates.entries()) {
+    if (signal.aborted) break
+    // Every candidate gets its own config, including the first. `call` was
+    // translated against whatever `resolveRoute` picked, and that may well be a
+    // target whose cooldown is still running — so the candidate's own
+    // provider/model has to win in every case, not just from the second one on.
+    const attemptCall = {
+      ...call,
+      config: { ...call.config, provider: candidate.provider, model: candidate.model },
+    }
+
+    trace.provider = candidate.provider
+    trace.upstreamModel = candidate.model
+    trace.attempts = (trace.attempts ?? 0) + 1
+    trace.failoverIndex = index
+
+    const outcome = attemptCall.wantsStream
+      ? await streamCompletion(ctx, state, res, attemptCall, signal)
+      : await blockingCompletion(ctx, state, res, attemptCall, signal)
+
+    if (outcome?.ok === true) {
+      if (candidate.target !== undefined) state.failover.delete(candidate.target)
+      return outcome
+    }
+
+    lastFailure = outcome?.failure
+    if (candidate.target !== undefined && failoverEligible(lastFailure, { committed: outcome?.committed === true }) !== undefined) {
+      coolDown(state, candidate.target, lastFailure)
+    }
+    // A committed stream has already answered; nothing left to try.
+    if (outcome?.committed === true) return outcome
+    if (failoverEligible(lastFailure, { committed: false }) === undefined) break
+    if (index < candidates.length - 1) {
+      logInfo(
+        ctx,
+        `failover ${requested}: ${candidate.provider}/${candidate.model} failed (${lastFailure?.code ?? 'error'}), trying ${candidates[index + 1].provider}/${candidates[index + 1].model}`,
+      )
+    }
+  }
+
+  state.failures += 1
+  trace.outcome = signal.aborted ? 'aborted' : 'error'
+  trace.code = lastFailure?.code
+  trace.message = messageOf(lastFailure)
+  sendFailure(res, lastFailure)
+  return { ok: false }
 }
 
 /* --------------------------------------------------------- translation */
@@ -923,12 +1082,15 @@ async function resolveRoute(ctx, state, ttl, requested) {
   // An alias is resolved before the catalog is consulted: the whole point of
   // one is to name a model the caller cannot address unambiguously, and a
   // colliding bare id would otherwise throw before the alias is considered.
-  const alias = state.store.aliases[requested]
-  if (alias !== undefined) {
-    const cut = alias.indexOf('/')
-    if (cut > 0) {
-      const provider = alias.slice(0, cut)
-      const model = alias.slice(cut + 1)
+  // A multi-target alias resolves to its first usable target here; the others
+  // are kept for the failover loop in `handleChat`.
+  const targets = aliasTargets(state, requested)
+  if (targets !== undefined) {
+    for (const target of targets) {
+      const cut = target.indexOf('/')
+      if (cut <= 0) continue
+      const provider = target.slice(0, cut)
+      const model = target.slice(cut + 1)
       if (providers.includes(provider) && model.length > 0) return { provider, model }
     }
   }
@@ -950,33 +1112,105 @@ async function resolveRoute(ctx, state, ttl, requested) {
 /* ---------------------------------------------------------------- aliases */
 
 /**
- * Aliases as `{ alias, target }` pairs. An alias that names a provider the
- * profile no longer registers is still advertised: dropping it silently would
- * turn a stale entry into a mystery 404 at the client, while keeping it lets
- * the request fail with the adapter's own answer.
+ * Aliases as `{ alias, targets }` pairs, in the order they will be tried. An
+ * alias that names a provider the profile no longer registers is still
+ * advertised: dropping it silently would turn a stale entry into a mystery 404
+ * at the client, while keeping it lets the request fail with the adapter's own
+ * answer.
  */
 function aliasEntries(state) {
-  return Object.entries(state.store.aliases).map(([alias, target]) => ({ alias, target }))
+  return Object.entries(state.store.aliases).map(([alias, targets]) => ({ alias, targets }))
 }
 
 /**
- * Accept only `{"name": "provider/model"}` pairs. Anything else is dropped
- * rather than rejected: a partially useful table beats a boot failure, and
- * the page's own write route validates the shape it sends.
+ * The list a single alias points at. The stored form is always an array, but
+ * every reader goes through here so a store written by an older build — where
+ * a target was one string — keeps working without a migration step.
+ */
+function aliasTargets(state, alias) {
+  const stored = state.store.aliases[alias]
+  if (stored === undefined) return undefined
+  return Array.isArray(stored) ? stored : [stored]
+}
+
+/**
+ * Accept `{"name": "provider/model"}` and `{"name": ["provider/model", …]}`.
+ *
+ * Anything else is dropped rather than rejected: a partially useful table beats
+ * a boot failure, and the page's own write route validates the shape it sends.
+ * A duplicate target inside one alias is dropped too — trying the same endpoint
+ * twice cannot succeed the second time, it only doubles the wait.
  */
 function normalizeAliases(input) {
   if (input === null || typeof input !== 'object' || Array.isArray(input)) return {}
   const aliases = {}
-  for (const [alias, target] of Object.entries(input)) {
+  for (const [alias, raw] of Object.entries(input)) {
     const name = typeof alias === 'string' ? alias.trim() : ''
-    const value = typeof target === 'string' ? target.trim() : ''
-    if (name.length === 0 || value.length === 0) continue
-    // An alias without a provider prefix cannot be resolved deterministically;
-    // the caller should name the model it means.
-    if (value.indexOf('/') <= 0) continue
-    aliases[name] = value
+    if (name.length === 0) continue
+    const list = Array.isArray(raw) ? raw : [raw]
+    const targets = []
+    for (const entry of list) {
+      const value = typeof entry === 'string' ? entry.trim() : ''
+      if (value.length === 0) continue
+      // An alias without a provider prefix cannot be resolved deterministically;
+      // the caller should name the model it means.
+      if (value.indexOf('/') <= 0) continue
+      if (targets.includes(value)) continue
+      targets.push(value)
+    }
+    if (targets.length === 0) continue
+    aliases[name] = targets
   }
   return aliases
+}
+
+/**
+ * Whether a target can be tried right now.
+ *
+ * Cooldowns live in memory only: a restart is exactly when a spent quota may
+ * have been reset, so persisting "this one is bad" would outlive the fact that
+ * made it true.
+ */
+function targetUsable(state, target) {
+  const until = state.failover.get(target)
+  if (until === undefined) return true
+  if (Date.now() >= until) {
+    state.failover.delete(target)
+    return true
+  }
+  return false
+}
+
+/** Record that a target just failed in a way another target might survive. */
+function coolDown(state, target, failure) {
+  state.failover.set(target, Date.now() + FAILOVER_COOLDOWN_MS)
+  state.failoverReason.set(target, {
+    code: failure?.code,
+    message: messageOf(failure),
+    at: Date.now(),
+    until: Date.now() + FAILOVER_COOLDOWN_MS,
+  })
+}
+
+/**
+ * Why a failure should move on to the next target, or `undefined` to stop.
+ *
+ * A committed stream is never failed over: the caller has already seen part of
+ * an answer, and replaying the request elsewhere would either duplicate it or
+ * silently replace it with a different one.
+ */
+function failoverEligible(failure, { committed }) {
+  if (committed) return undefined
+  if (failure === undefined || failure === null) return undefined
+  if (typeof failure.code !== 'string' || !FAILOVER_CODES.has(failure.code)) return undefined
+  return failure
+}
+
+/** The alias targets to try for `requested`, or `undefined` when it is not one. */
+function aliasPlan(state, requested) {
+  const targets = aliasTargets(state, requested)
+  if (targets === undefined || targets.length === 0) return undefined
+  return targets
 }
 
 /** `https://host/path` without a trailing slash, or undefined when unusable. */
@@ -1387,7 +1621,7 @@ async function blockingCompletion(ctx, state, res, call, signal) {
   const trace = call.trace ?? {}
   let result
   for (let attempt = 0; ; attempt += 1) {
-    trace.attempts = attempt + 1
+    trace.attempts = (trace.attempts ?? 0) + 1
     try {
       result = await runOnce(false)
       if (stopRefused(result.finish, call.stopRequested)) result = await runOnce(true)
@@ -1396,12 +1630,13 @@ async function blockingCompletion(ctx, state, res, call, signal) {
         ? retryDelayMs(state.retry, attempt + 1, error)
         : undefined
       if (delay === undefined || !await sleep(delay, signal)) {
-        state.failures += 1
         trace.outcome = signal.aborted ? 'aborted' : 'error'
         trace.code = error?.code
         trace.message = messageOf(error)
-        sendFailure(res, error)
-        return
+        // Nothing has been written yet, so the caller of this function still
+        // owns the response: it may hand the request to another target instead
+        // of answering with this failure.
+        return { failure: error }
       }
       logInfo(ctx, `retrying after ${messageOf(error)} in ${delay}ms (${attempt + 1}/${RETRY_MAX_RETRIES})`)
       continue
@@ -1420,21 +1655,17 @@ async function blockingCompletion(ctx, state, res, call, signal) {
 
   if (result.finish?.kind === 'stop' && result.text.length === 0 && result.tools.size === 0) {
     const failure = { code: 'EMPTY_RESPONSE', message: 'the model finished without producing any content' }
-    state.failures += 1
     trace.outcome = 'error'
     trace.code = failure.code
     trace.message = failure.message
-    sendFailure(res, failure)
-    return
+    return { failure }
   }
 
   if (result.finish?.kind === 'error' || result.finish?.kind === 'aborted') {
-    state.failures += 1
     trace.outcome = result.finish.kind === 'aborted' ? 'aborted' : 'error'
     trace.code = result.finish.failure?.code
     trace.message = messageOf(result.finish.failure)
-    sendFailure(res, result.finish.failure)
-    return
+    return { failure: result.finish.failure }
   }
   trace.firstByteMs = Date.now() - trace.at
   trace.textBytes = result.text.length
@@ -1473,6 +1704,7 @@ async function blockingCompletion(ctx, state, res, call, signal) {
     ],
     ...(result.usage === undefined ? {} : { usage: openAiUsage(result.usage) }),
   })
+  return { ok: true }
 }
 
 /**
@@ -1592,23 +1824,22 @@ async function streamCompletion(ctx, state, res, call, signal) {
         : undefined
       if (delay === undefined || !await sleep(delay, signal)) {
         keepAlive.stop()
-        state.failures += 1
         trace.outcome = signal.aborted ? 'aborted' : 'error'
         trace.code = error?.code
         trace.message = messageOf(error)
-        if (!open) {
-          sendFailure(res, error)
-          return
-        }
-        // Committed already: end the stream with the error *and* the terminal
-        // marker, so the caller reads "the upstream failed" instead of
-        // "the connection dropped".
+        // Nothing committed: the caller still owns the response and may try
+        // another target. Committed: this failure is final for this request.
+        if (!open) return { failure: error, committed: false }
+        state.failures += 1
+        // End the stream with the error *and* the terminal marker, so the
+        // caller reads "the upstream failed" instead of "the connection
+        // dropped".
         res.write(
           `data: ${JSON.stringify({ error: { message: messageOf(error), type: 'server_error' } })}\n\n`,
         )
         res.write('data: [DONE]\n\n')
         res.end()
-        return
+        return { ok: true, committed: true }
       }
       logInfo(ctx, `retrying stream after ${messageOf(error)} in ${delay}ms (${attempt + 1}/${RETRY_MAX_RETRIES})`)
       continue
@@ -1629,12 +1860,10 @@ async function streamCompletion(ctx, state, res, call, signal) {
   keepAlive.stop()
 
   if (!open && (finish?.kind === 'error' || finish?.kind === 'aborted')) {
-    state.failures += 1
     trace.outcome = finish.kind === 'aborted' ? 'aborted' : 'error'
     trace.code = finish.failure?.code
     trace.message = messageOf(finish.failure)
-    sendFailure(res, finish.failure)
-    return
+    return { failure: finish.failure, committed: false }
   }
 
   // Exhausted the retries and the model still answered nothing: say so. An
@@ -1642,20 +1871,17 @@ async function streamCompletion(ctx, state, res, call, signal) {
   // client's side, which is the report this whole path exists to stop.
   if (finish?.kind === 'stop' && trace.textBytes === 0 && (trace.toolCalls ?? 0) === 0) {
     const failure = { code: 'EMPTY_RESPONSE', message: 'the model finished without producing any content' }
-    state.failures += 1
     trace.outcome = 'error'
     trace.code = failure.code
     trace.message = failure.message
-    if (!open) {
-      sendFailure(res, failure)
-      return
-    }
+    if (!open) return { failure, committed: false }
+    state.failures += 1
     res.write(
       `data: ${JSON.stringify({ error: { message: failure.message, type: 'server_error', code: failure.code } })}\n\n`,
     )
     res.write('data: [DONE]\n\n')
     res.end()
-    return
+    return { ok: true, committed: true }
   }
 
   // The stream is already committed, so the failure has to travel inside it.
@@ -1678,7 +1904,8 @@ async function streamCompletion(ctx, state, res, call, signal) {
     )
     res.write('data: [DONE]\n\n')
     res.end()
-    return
+    // Already answered: the caller must not fail over or send a second reply.
+    return { ok: true, committed: true }
   }
 
   flush()
@@ -1701,6 +1928,7 @@ async function streamCompletion(ctx, state, res, call, signal) {
   }
   res.write('data: [DONE]\n\n')
   res.end()
+  return { ok: true }
 }
 
 function openAiFinish(reason) {
@@ -2002,20 +2230,30 @@ async function applyAliases(ctx, state, req, res, bodyLimit) {
     if (typeof incoming !== 'object' || Array.isArray(incoming)) {
       sendJson(res, 400, {
         error: 'aliases-invalid',
-        message: 'aliases must be an object of {"name":"provider/model"} pairs',
+        message: 'aliases must be an object of {"name":"provider/model"} or {"name":["provider/model", …]} pairs',
       })
       return
     }
     // A target that is not `provider/model` cannot be routed, so the write is
     // refused here instead of leaving an alias that always 404s.
-    for (const [alias, target] of Object.entries(incoming)) {
-      const value = typeof target === 'string' ? target.trim() : ''
-      if (value.length === 0 || value.indexOf('/') <= 0) {
+    for (const [alias, raw] of Object.entries(incoming)) {
+      const list = Array.isArray(raw) ? raw : [raw]
+      if (list.length === 0) {
         sendJson(res, 400, {
           error: 'alias-target-invalid',
           message: `alias "${alias}" must point at "provider/model"`,
         })
         return
+      }
+      for (const entry of list) {
+        const value = typeof entry === 'string' ? entry.trim() : ''
+        if (value.length === 0 || value.indexOf('/') <= 0) {
+          sendJson(res, 400, {
+            error: 'alias-target-invalid',
+            message: `alias "${alias}" must point at "provider/model"`,
+          })
+          return
+        }
       }
     }
   }
@@ -2057,11 +2295,18 @@ function startTunnel(ctx, state) {
     return
   }
 
-  const binary = provider === 'ngrok' ? 'ngrok' : 'cloudflared'
-  const args =
+  // The binary is overridable so a test can substitute a script instead of
+  // spawning the real tunnel agent. On Windows `spawn` resolves an executable
+  // image and ignores a `.cmd` shim, so the only safe substitution is to run a
+  // different command outright — which is what `command`/`prefixArgs` allow.
+  const command = state.tunnelCommand?.command ?? (provider === 'ngrok' ? 'ngrok' : 'cloudflared')
+  const prefixArgs = state.tunnelCommand?.prefixArgs ?? []
+  const binary = command === process.execPath ? 'ngrok' : command
+  const providerArgs =
     provider === 'ngrok'
       ? ['http', String(port), '--log', 'stdout', '--log-format', 'json']
       : ['tunnel', '--url', `http://${LISTEN_HOST}:${port}`, '--no-autoupdate']
+  const args = [...prefixArgs, ...providerArgs]
 
   state.tunnel.status = 'starting'
   state.tunnel.provider = provider
@@ -2071,7 +2316,7 @@ function startTunnel(ctx, state) {
 
   let child
   try {
-    child = spawn(binary, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+    child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   } catch (error) {
     state.tunnel.status = 'failed'
     state.tunnel.error = `could not run ${binary}: ${messageOf(error)}`
@@ -2098,6 +2343,15 @@ function startTunnel(ctx, state) {
   }, TUNNEL_START_TIMEOUT_MS)
   timer.unref?.()
 
+  // ngrok explains a failed start on both streams — with `--log stdout` the
+  // JSON records go to stdout and a short human summary to stderr, and both
+  // carry the error code. Collecting only one of them loses the reason half the
+  // time, so both are kept.
+  let outputTail = ''
+  const collect = (chunk) => {
+    outputTail = (outputTail + String(chunk)).slice(-4000)
+  }
+
   const readLine = (chunk) => {
     // The URL is matched anywhere in the chunk rather than only at the start
     // of a line: a JSON log record carries it mid-string, and ngrok can emit
@@ -2110,8 +2364,14 @@ function startTunnel(ctx, state) {
     logInfo(ctx, `tunnel up at ${url}`)
   }
 
-  child.stdout?.on('data', readLine)
-  child.stderr?.on('data', readLine)
+  child.stdout?.on('data', (chunk) => {
+    collect(chunk)
+    readLine(chunk)
+  })
+  child.stderr?.on('data', (chunk) => {
+    collect(chunk)
+    readLine(chunk)
+  })
 
   child.on('error', (error) => {
     finish('failed', `could not run ${binary}: ${messageOf(error)}`)
@@ -2123,11 +2383,64 @@ function startTunnel(ctx, state) {
     state.tunnel.pid = undefined
     // An exit before the URL arrived is a failure the page should show; one
     // after it is just the tunnel being taken down.
-    if (state.tunnel.url === undefined) finish('failed', `${binary} exited with code ${code}`)
-    else state.tunnel.status = 'stopped'
+    if (state.tunnel.url === undefined) {
+      finish('failed', explainTunnelExit(provider, binary, code, outputTail))
+    } else state.tunnel.status = 'stopped'
   })
 
   state.tunnel.child = child
+}
+
+/**
+ * Turn a tunnel's exit into a message the page can act on.
+ *
+ * The plain `exited with code 1` is technically true and completely useless:
+ * ngrok had already printed the reason and the two URLs that fix it, and the
+ * old code dropped all of it on the floor. The message is kept short and the
+ * links travel separately, so the page can render them as links rather than
+ * making the user copy a URL out of a sentence.
+ */
+function explainTunnelExit(provider, binary, code, stderr) {
+  if (provider === 'ngrok' && stderr.includes(NGROK_NEEDS_CREDENTIAL)) {
+    return (
+      'ngrok needs an account and an authtoken before it can open a tunnel. ' +
+      `Run \`ngrok config add-authtoken <token>\` with the token from ${NGROK_TOKEN_URL}, ` +
+      'then start the tunnel again.'
+    )
+  }
+  // Any other provider failure keeps whatever the binary actually said, minus
+  // the log noise, so the real reason is not replaced by a generic one.
+  const detail = lastMeaningfulLine(stderr)
+  return detail === undefined ? `${binary} exited with code ${code}` : `${binary} exited with code ${code}: ${detail}`
+}
+
+/**
+ * The most useful line of a provider's stderr.
+ *
+ * ngrok's JSON log puts the reason in an `err` field and repeats it across
+ * several records; cloudflared writes plain text. Preferring an `err` value
+ * picks the reason over the surrounding bookkeeping.
+ */
+function lastMeaningfulLine(text) {
+  const lines = String(text)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line !== '')
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index]
+    const json = /"err":"((?:[^"\\]|\\.)*)"/.exec(line)
+    if (json !== null) return unescapeJsonString(json[1]).split(/\r?\n/)[0].slice(0, 300)
+    if (/^ERROR\b|^\s*err:|error/i.test(line)) return line.slice(0, 300)
+  }
+  return undefined
+}
+
+function unescapeJsonString(value) {
+  try {
+    return JSON.parse(`"${value}"`)
+  } catch {
+    return value
+  }
 }
 
 function stopTunnel(ctx, state) {
@@ -2176,17 +2489,32 @@ async function applyTunnel(ctx, state, req, res, bodyLimit) {
   sendJson(res, 200, tunnelPayload(state))
 }
 
-function tunnelPayload(state) {
+/**
+ * The tunnel block both the status document and the control route publish.
+ *
+ * One function rather than two literals: they were duplicated, and the copy in
+ * the status document is the one the page actually reads, so a field added to
+ * only one of them would have been invisible exactly where it mattered.
+ */
+function tunnelState(state) {
   return {
-    tunnel: {
-      status: state.tunnel.status,
-      provider: state.tunnel.provider ?? null,
-      url: state.tunnel.url ?? null,
-      error: state.tunnel.error ?? null,
-      pid: state.tunnel.pid ?? null,
-      autostart: state.tunnelConfig.autostart,
-    },
+    status: state.tunnel.status,
+    provider: state.tunnel.provider ?? null,
+    url: state.tunnel.url ?? null,
+    error: state.tunnel.error ?? null,
+    pid: state.tunnel.pid ?? null,
+    autostart: state.tunnelConfig.autostart,
+    // Set only when the failure was "no credential": the page then offers the
+    // signup and token pages as buttons instead of leaving the user to read
+    // two URLs out of an error string.
+    needsCredential: state.tunnel.error !== undefined && state.tunnel.error.includes(NGROK_TOKEN_URL),
+    signupUrl: NGROK_SIGNUP_URL,
+    tokenUrl: NGROK_TOKEN_URL,
   }
+}
+
+function tunnelPayload(state) {
+  return { tunnel: tunnelState(state) }
 }
 
 /* --------------------------------------------------------------- status */
@@ -2259,14 +2587,11 @@ async function statusPayload(ctx, state, ttl, refresh) {
       ...(entry.model.name === entry.model.id ? {} : { name: entry.model.name }),
     })),
     aliases: aliasEntries(state),
-    tunnel: {
-      status: state.tunnel.status,
-      provider: state.tunnel.provider ?? null,
-      url: state.tunnel.url ?? null,
-      error: state.tunnel.error ?? null,
-      pid: state.tunnel.pid ?? null,
-      autostart: state.tunnelConfig.autostart,
-    },
+    // Which targets are sitting out right now, and the reason each was benched.
+    // Derived from the in-memory cooldown map on every read, so the page never
+    // shows a target as unavailable after its cooldown has expired.
+    failover: failoverState(state),
+    tunnel: tunnelState(state),
     providers: ctx.llm.listProviders().map((provider) => ({
       id: provider.id,
       name: typeof provider.name === 'string' ? provider.name : provider.id,
@@ -2286,6 +2611,35 @@ async function statusPayload(ctx, state, ttl, refresh) {
     startedAt: state.startedAt,
     catalogAt: state.catalog.at,
   }
+}
+
+/**
+ * The live cooldown table, as the page needs it.
+ *
+ * Expired entries are dropped on read rather than on a timer: a target becomes
+ * usable again the moment its cooldown passes, and nothing has to run in the
+ * background to make that true.
+ */
+function failoverState(state) {
+  const now = Date.now()
+  const cooling = []
+  for (const [target, until] of state.failover) {
+    if (now >= until) {
+      state.failover.delete(target)
+      state.failoverReason.delete(target)
+      continue
+    }
+    const reason = state.failoverReason.get(target)
+    cooling.push({
+      target,
+      until,
+      remainingMs: until - now,
+      code: reason?.code,
+      message: reason?.message,
+    })
+  }
+  cooling.sort((a, b) => a.until - b.until)
+  return { cooldownMs: FAILOVER_COOLDOWN_MS, cooling }
 }
 
 /* ----------------------------------------------------------- http utils */

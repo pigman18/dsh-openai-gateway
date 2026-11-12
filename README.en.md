@@ -26,7 +26,7 @@ A standalone [DeepSeek Harness (DSH)](https://github.com/deepseek-ai/deepseek-ha
 - **One endpoint, every model** — `/v1/models` lists every model of every provider as `provider/model` (`workbuddy/deepseek-v4.1-flash`, `opencode2dsh/deepseek-v4.1-flash-free`, `local/qwen3.5:4b`, …). A bare id also works when exactly one provider serves it; when several do, the request is rejected with the candidates listed instead of guessing.
 - **Fixed port** — the gateway listens on `127.0.0.1:8787` itself, independent of the UI port (which the OS may pick differently on each start). If that port is already taken it comes up on an OS-assigned one and says so on the page (`random (8787 was taken)`) rather than failing.
 - **Fixed key** — `sk-dsh-…` is minted on first start and stored in `$DSH_HOME/openai-gateway/settings.json` (mode 0600), so it survives restarts; **Regenerate** on the page mints a new one (two-step confirm, the old key stops working at once). A legacy `api-key` file is migrated on first load, so an already-configured client keeps working.
-- **Sidebar dashboard** — a sticky header carries the running state and a refresh control; below it five metric tiles (requests / failures, models and providers, token usage, traffic, uptime), then a two-column card grid (address and port, tunnel, key, model aliases), a **searchable** catalog grouped by provider (filter by id, name, or provider), and a recent-request table (time, model, ok or failure code, tokens in → out, duration). Every colour, border, radius, shadow and type size comes from a host theme token, so light and dark both follow with no hard-coded values.
+- **Sidebar dashboard** — five tabs: **Overview** (a sticky header with the running state and a refresh control, five metric tiles — requests / failures, models and providers, token usage, traffic, uptime — and a recent-request table), **Routes** (each route's try order, health, and cooldown countdown, with a modal picker to add and edit), **Tunnel** (the large public address, start and stop, provider choice, and the signup entry point when a credential is missing), **Catalog** (a **searchable** model list grouped by provider, filtered by id, name, or provider), and **Settings** (public and local address, key, port, curl example). Every colour, border, radius, shadow and type size comes from a host theme token, so light and dark both follow with no hard-coded values.
 - **Streaming and non-streaming** — `"stream": true` returns standard SSE (`data: …` frames, `[DONE]` last); otherwise a full `chat.completion`.
 - **Tool calls** — `tools` are forwarded, calls come back as `tool_calls` with reassembled `arguments` and `finish_reason: "tool_calls"`, and a `tool` message resolves by its `tool_call_id`. When the assistant turn omits the id, the result's id wins instead of a freshly invented one — an upstream answers a call with no result with an empty reply.
 - **Images and files** — `image_url` / `input_image` and `file` / `input_file` are supported. Images: `data:` URLs are decoded, `http(s)` images are fetched by the gateway (25 MiB cap), and both are **committed to the host attachment store** (`ctx.attachments`) so the model receives durable image blocks rather than a URL only the caller can reach; images in one user message are admitted as a single batch, so the store's count and byte limits still apply, and a text-only model gets the host's placeholder line. Files: **anything readable as text is inlined** (`[attached file: name]` plus the content, up to 2 MiB, valid UTF-8 without NUL bytes); everything else (PDF, images, archives) is stored and handed over as a `file` block. A profile without an attachment store answers 400 instead of quietly sending text only.
@@ -174,12 +174,39 @@ An external client sends whatever name it was configured with; an alias attaches
         deepseek-v4.1-flash: opencode2dsh/deepseek-v4.1-flash-free   # also disambiguates a colliding bare id
 ```
 
-You can also add and remove them on the page's **Model aliases** card (written back to `settings.json`, so they survive a restart). Rules:
+You can also add and remove them on the page's **Routes** tab (written back to `settings.json`, so they survive a restart). **Add route**, or a row's **Edit**, opens a picker: the left pane groups every model by provider and searches id, display name, and provider at once; the tick order becomes the fallback order, and the right pane reorders it with the arrows or by dragging. A model another route already holds is labelled with its owner. Rules:
 
 - The target must be `provider/model`; a target without a provider prefix is dropped rather than left as an alias that always 404s.
 - An alias resolves before the catalog, so it **beats a colliding bare id** — when three providers share `deepseek-v4.1-flash`, one alias points it at a single destination.
 - Aliases appear in `/v1/models` (with an `alias_of` field), so a client's model picker can see them.
 - The `model` field in a response echoes **the name the caller sent**, not the upstream id.
+
+### Failover across several targets
+
+One alias may name several targets in try order; when the first cannot serve, the next one is used:
+
+```yaml
+- insert:
+    - id: dsh-openai-gateway
+      name: dsh-openai-gateway
+      aliases:
+        deepseek-flash:
+          - our-free-model/deepseek-v4.1-flash-free
+          - trae/deepseek-v4.1-flash
+          - trae-global/deepseek-v4.1-flash
+          - workbuddy/deepseek-v4.1-flash
+          - qoder-cn/DeepSeek-Flash
+```
+
+On the page this is a multi-line box, one target per line. Behaviour:
+
+- **What counts as unavailable**: quota spent (`QUOTA` / `QUOTA_EXCEEDED`), throttling (`RATE_LIMIT`), timeouts (`TIMEOUT`), unreachable hosts (`TRANSPORT`), upstream 5xx (`SERVER`), empty replies (`EMPTY_RESPONSE`).
+- **What does not**: `INVALID_REQUEST`, `UNSUPPORTED_*`, `CONTEXT_WINDOW_EXCEEDED`. Those describe the caller's own payload, so every other target would reject it identically — walking the whole chain would only multiply the latency of an answer that cannot change. It is refused directly.
+- **Five-minute cooldown**: a failed target is remembered and skipped for five minutes, then returns automatically. The table is **in memory only**, so a restart clears it — and a restart is exactly when a spent quota may have reset.
+- **No probing**: nothing is sent during a cooldown. A target earns its way back by being the next one a real request needs, so failover costs **no extra quota**. On the page a benched target is struck through, and hovering shows the reason and remaining time.
+- **When everything is benched** the request still goes out, to the target whose cooldown ends first. A caller would rather get a real 402 than a synthetic "everything is cooling down" that no client knows how to read.
+- **Failover only before the response commits.** Once a stream has sent its first delta the answer is partly delivered, so replaying it would either duplicate content or silently swap the model; that failure is reported instead.
+- The same target listed twice in one alias is deduplicated — trying one endpoint twice cannot succeed the second time, it only doubles the wait.
 
 ## Endpoints
 
@@ -187,7 +214,7 @@ You can also add and remove them on the page's **Model aliases** card (written b
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/v1/models` | Every model of every provider, plus every alias (`?refresh=1` bypasses the 60 s cache) |
+| `GET` | `/v1/models` | Every model of every provider, plus every alias (a multi-target alias carries `alias_of` and `alias_targets`; `?refresh=1` bypasses the 60 s cache) |
 | `GET` | `/v1/models/<provider>/<model>` | One model; `/v1/models/<alias>` returns that alias's `alias_of` too |
 | `POST` | `/v1/chat/completions` | Chat completions, streaming or not; `model` may be `provider/model`, an alias, or an unambiguous bare id |
 | `POST` | `/v1/completions` | Same handler, for clients that insist on the legacy path |
@@ -195,7 +222,7 @@ You can also add and remove them on the page's **Model aliases** card (written b
 | `GET` | `/plugins/dsh-openai-gateway/status` | Status document the page reads; carries the whole catalog (rebuilt once the 60 s cache expires; `?refresh=1` forces a rebuild), `aliases`, `tunnel`, `baseUrl` / `localBaseUrl`, the `usageTotals` and `bytes` counters, plus `recent`: the last 20 requests with duration, first-byte time, attempts, usage and outcome |
 | `POST` | `/plugins/dsh-openai-gateway/settings` | `{"port": 8787}` — rebind, `409` if that port is taken |
 | `POST` | `/plugins/dsh-openai-gateway/key` | `{"action":"regenerate"}` — mint a new key |
-| `POST` | `/plugins/dsh-openai-gateway/aliases` | `{"aliases":{"gpt-4o":"provider/model"}}` — replace the whole table; `{}` clears it |
+| `POST` | `/plugins/dsh-openai-gateway/aliases` | `{"aliases":{"gpt-4o":["provider/model"]}}` — replace the whole table; a bare string is accepted too; `{}` clears it |
 | `POST` | `/plugins/dsh-openai-gateway/tunnel` | `{"action":"start"}` / `{"action":"stop"}` — run or stop the tunnel the plugin supervises |
 
 Requests are authorised with `Authorization: Bearer <key>`, compared in constant time.
@@ -219,7 +246,7 @@ Both live in one plugin-owned file, so nothing needs reconfiguring after a resta
 
 ```
 $DSH_HOME/openai-gateway/settings.json      # default ~/.dsh/openai-gateway/settings.json
-{ "port": 8787, "apiKey": "sk-dsh-…", "aliases": { "gpt-4o": "provider/model" } }
+{ "port": 8787, "apiKey": "sk-dsh-…", "aliases": { "gpt-4o": ["provider/model"] } }
 ```
 
 - **Port** — prefers `8787`. If it is already bound at start, the gateway serves on an OS-assigned port instead of going down, and the page shows the port that was taken. Changing it from the page rebinds immediately; a port that is already in use is reported (`409`) and the gateway keeps serving on the old one.
@@ -246,7 +273,7 @@ Optional keys on the bundle row:
 | `maxMessages` | `0` (off) | Drop the oldest turns beyond this many, always keeping the history starting at a `user` message |
 | `publicBaseUrl` | unset | The address external clients should use (e.g. `https://name.ngrok-free.dev/v1`). The page's public row and the curl example follow it; an unusable value is ignored |
 | `tunnel` | unset | `{ provider: "ngrok" \| "cloudflared", autostart: true }` — let the plugin supervise a tunnel process |
-| `aliases` | unset | `{ "name the client sends": "provider/model" }`; wins over the stored alias table |
+| `aliases` | unset | `{ "name the client sends": ["provider/model", …] }` (a bare string works too); wins over the stored alias table |
 
 ## Known limits
 
@@ -256,9 +283,13 @@ Optional keys on the bundle row:
 - **Provider-injected notices pass through**: for example an account-pool failover line from upstream arrives as ordinary assistant text, neither swallowed nor rewritten.
 - **A profile with no web server (headless)** has no page and no control routes, but `/v1/*` still serves on the fixed port.
 - **Prefer `stream: true` for long work**: a non-streaming request writes nothing until the whole answer is ready, so any read timeout will hit it.
+- **Failover only happens before the response commits**: once a stream has sent its first delta the answer is partly delivered, so a failure there is reported instead of being replayed on another target — replaying would duplicate content, or swap the model without the caller knowing.
+- **Cooldowns are not persisted**: a restart clears them. That is deliberate — a restart is exactly when a spent quota may have reset, and writing "this target is bad" to disk would let it outlive the fact that made it true.
 - **A streaming failure after `silentFlushMs` arrives in-stream**: once the headers are committed (to keep the connection warm), a pre-content failure can only be reported as `data: {"error": …}` + `data: [DONE]`, without an HTTP status.
 - **The tunnel is a child process of the plugin**: one ngrok free account has a single dev domain, and a second connection to it is refused with `ERR_NGROK_334`. A manually started ngrok has to be stopped before the plugin can take over, or the page's tunnel status shows that failure.
 - **`ERR_NGROK_3200` means the endpoint is offline**: the dev domain belongs to your account and its address is stable, but it is offline whenever no ngrok process is running. Set `autostart`, or press Start on the page's tunnel card.
+- **`ERR_NGROK_4018` means there is no authtoken yet**: ngrok needs an account and a credential before it will open a session. The tunnel card then shows "Create an ngrok account" and "Get an authtoken" buttons; run `ngrok config add-authtoken <token>` with what you copy, then press Start again.
+  - Note that `ngrok config add-authtoken` **fails silently** when the config has an empty `agent:` key: it still prints `Authtoken saved to configuration file`, but no token lands in the file. If a token does not clear the 4018, reduce the config to the single line `version: "3"` and retry.
 - **ngrok's free plan interposes a browser warning**: `ERR_NGROK_6024` only affects opening the URL in a browser to debug. Cursor's user agent (measured `cursor/0.48.9`) plus `python-requests`, `OpenAI-Python` and `curl` all pass through, and any request carrying an `Authorization` header is not interposed.
 - It binds `127.0.0.1` only; do not forward it to a network, and publish only `/v1` through the tunnel.
 
