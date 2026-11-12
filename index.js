@@ -78,6 +78,15 @@ const FAILOVER_COOLDOWN_MS = 5 * 60_000
  * CONTEXT_WINDOW_EXCEEDED). Those describe the caller's own payload, so every
  * other target would reject it identically — walking the whole list would just
  * multiply the latency of an answer that is never going to change.
+ *
+ * UNKNOWN_MODEL is the exception, and it belongs here: a target that names a
+ * model the provider no longer advertises says nothing about the caller's
+ * payload, and says nothing about the other targets either. It is a stale row in
+ * one alias entry. Leaving it out stopped the whole chain: one renamed upstream
+ * model made an eight-target route answer 502 without ever trying targets six
+ * through eight, which look perfectly healthy on the page. The catalogue drifts
+ * whenever a provider renames a model, so this is a routine event, not an
+ * exceptional one.
  */
 const FAILOVER_CODES = new Set([
   'QUOTA',
@@ -87,6 +96,7 @@ const FAILOVER_CODES = new Set([
   'TRANSPORT',
   'SERVER',
   'EMPTY_RESPONSE',
+  'UNKNOWN_MODEL',
 ])
 const KEY_PREFIX = 'sk-dsh-'
 /** Service keys for the HTTP surface, newest name first. */
@@ -2721,6 +2731,12 @@ function statusForCode(code) {
     case 'INVALID_MODEL_REASONING':
     case 'INVALID_CATALOG':
     case 'QUOTA_EXCEEDED':
+      return 400
+    // A stale target is the gateway's own configuration problem, not a fault in
+    // the caller's request and not a broken upstream. It only reaches the caller
+    // when every other target also failed, so answer 400 with the model named
+    // rather than a 502 that reads like the whole gateway is down.
+    case 'UNKNOWN_MODEL':
       return 400
     case 'CONTEXT_WINDOW_EXCEEDED':
       return 413

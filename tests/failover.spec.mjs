@@ -229,6 +229,65 @@ await check('a throttle, a timeout, a 5xx and an unreachable host all fail over'
   }
 })
 
+await check('a stale model name in the middle of the chain does not end it', async () => {
+  /* The reported failure, reproduced: target 2 names a model the provider no
+     longer advertises, so it answers UNKNOWN_MODEL. That code was absent from
+     FAILOVER_CODES, so the loop stopped dead and target 3 — healthy — was never
+     tried. The caller got a 502 while two good targets sat unused.
+     A renamed upstream model is routine catalogue drift, so this must fail over
+     like any other "this target cannot serve" answer. */
+  const app = await boot(
+    { 'a/one': 'UNKNOWN_MODEL', 'b/two': 'ok' },
+    ['a/one', 'b/two'],
+  )
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `a stale target stopped the chain: ${res.text.slice(0, 240)}`)
+    assert.ok(res.text.includes('served-by:b/two'), `the healthy target was never tried: ${res.text.slice(0, 240)}`)
+    assert.deepEqual(app.llm.calls, ['a/one', 'b/two'], `unexpected attempt order: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a stale target between two good ones is stepped over, not fatal', async () => {
+  /* The exact shape of the real route: eight targets, one of them stale, the
+     healthy ones sitting behind it. Before the fix the request died at the stale
+     row and never reached the four targets that followed. */
+  const app = await boot(
+    {
+      'a/one': 'RATE_LIMIT',
+      'b/two': 'UNKNOWN_MODEL',
+      'c/three': 'ok',
+    },
+    ['a/one', 'b/two', 'c/three'],
+  )
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `the chain did not survive a stale row: ${res.text.slice(0, 240)}`)
+    assert.ok(res.text.includes('served-by:c/three'), `the third target did not answer: ${res.text.slice(0, 240)}`)
+    const order = [...new Set(app.llm.calls)]
+    assert.deepEqual(order, ['a/one', 'b/two', 'c/three'], `not every target was tried, in order: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a chain that is entirely stale names the model, not a broken gateway', async () => {
+  /* UNKNOWN_MODEL is a configuration problem: the gateway is fine, one alias row
+     points at a model that moved. With every target stale the caller has to learn
+     that, so it is a 400 naming the model rather than a 502 that reads like the
+     gateway itself is down. */
+  const app = await boot({ 'a/one': 'UNKNOWN_MODEL' }, ['a/one'])
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 400, `expected a configuration error, got ${res.status}: ${res.text.slice(0, 200)}`)
+    assert.ok(res.text.includes('a/one'), `the failing target is not named: ${res.text.slice(0, 200)}`)
+  } finally {
+    app.stop()
+  }
+})
+
 await check('the whole list is walked before the caller is refused', async () => {
   const app = await boot(
     { 'a/one': 'QUOTA', 'b/two': 'RATE_LIMIT', 'c/three': 'SERVER' },

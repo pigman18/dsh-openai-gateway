@@ -166,6 +166,7 @@ window.__ModuleLoader__.load({
 			"routes.needName": "还需要一个路由名",
 			"routes.summary": "{name} → {count} 个目标，按顺序兜底",
 			"routes.dragHint": "拖动调整顺序",
+			"routes.addMore": "还需要更多兜底？从左边继续勾选，勾中的会追加到末尾。",
 			"routes.moveUp": "上移",
 			"routes.moveDown": "下移",
 			"routes.removeTarget": "移除",
@@ -335,6 +336,7 @@ window.__ModuleLoader__.load({
 			"routes.needName": "A route name is still needed",
 			"routes.summary": "{name} → {count} targets, tried in order",
 			"routes.dragHint": "Drag to reorder",
+			"routes.addMore": "Want more fallbacks? Keep ticking on the left; new picks append to the end.",
 			"routes.moveUp": "Move up",
 			"routes.moveDown": "Move down",
 			"routes.removeTarget": "Remove",
@@ -1041,10 +1043,14 @@ window.__ModuleLoader__.load({
 	outline-offset: 1px;
 }
 
-/* The scrolling list. A bounded height keeps the modal from jumping as the
-   filter narrows; flex-grow lets it fill whatever the modal has. */
+/* The scrolling list. flex-grow lets it fill whatever the modal has; the modal's
+   own max-height and the body's overflow keep the whole dialog bounded, so the
+   list must not cap itself. A cap here was the blank right-hand column: the
+   picking pane spends 153px on its search box and provider chips, the chain pane
+   spends nothing, so a fixed cap stopped the chain 111px short of the bottom of
+   an equal-height pane and left a visible hole. */
 [${STYLE_ATTR}] .gw-pick-list {
-	flex: 1 1 auto; min-height: 190px; max-height: 340px;
+	flex: 1 1 auto; min-height: 190px;
 	overflow-y: auto; overscroll-behavior: contain;
 }
 [${STYLE_ATTR}] .gw-pick-group + .gw-pick-group { border-top: 1px solid var(--dsw-alias-border-l1); }
@@ -1147,9 +1153,10 @@ window.__ModuleLoader__.load({
 	color: var(--dsw-alias-state-business-primary);
 }
 
-/* The chosen chain: numbered, reorderable, removable. */
+/* The chosen chain: numbered, reorderable, removable. Same rule as the picking
+   list: grow to the bottom of the pane, no fixed cap. */
 [${STYLE_ATTR}] .gw-chain-list {
-	flex: 1 1 auto; min-height: 120px; max-height: 340px;
+	flex: 1 1 auto; min-height: 120px;
 	overflow-y: auto; overscroll-behavior: contain;
 }
 [${STYLE_ATTR}] .gw-chain-item {
@@ -1157,6 +1164,17 @@ window.__ModuleLoader__.load({
 	min-width: 0; padding: var(--gw-s2) var(--gw-s3);
 }
 [${STYLE_ATTR}] .gw-chain-item + .gw-chain-item { border-top: 1px solid var(--dsw-alias-border-l1); }
+/* A hint row under a short chain, not a list item: no border, no hover, lighter
+   than the rows above it so it never reads as one of the targets. */
+[${STYLE_ATTR}] .gw-chain-more {
+	margin: var(--gw-s3) var(--gw-s3) 0;
+	padding: var(--gw-s2) var(--gw-s3);
+	border-radius: var(--dsw-radius-sm);
+	border: 1px dashed var(--dsw-alias-border-l3);
+	color: var(--dsw-alias-label-caption);
+	font-size: 11.5px; line-height: 1.55;
+	text-align: center;
+}
 [${STYLE_ATTR}] .gw-chain-item.is-dragging { opacity: .4; }
 [${STYLE_ATTR}] .gw-chain-item.is-before { box-shadow: inset 0 2px 0 var(--dsw-alias-state-business-primary); }
 [${STYLE_ATTR}] .gw-chain-item.is-after { box-shadow: inset 0 -2px 0 var(--dsw-alias-state-business-primary); }
@@ -1210,16 +1228,19 @@ window.__ModuleLoader__.load({
 	font-size: 12.5px; font-weight: 600;
 	color: var(--dsw-alias-label-secondary);
 }
-[${STYLE_ATTR}] .gw-modal-hint {
+/* The ordering rule, stated inside the chain pane rather than under the whole
+   dialog. A note block here also gives the right-hand pane a block of its own
+   between its header and its list, matching the picking pane's tools strip. */
+[${STYLE_ATTR}] .gw-pane-tools.is-flush { padding: var(--gw-s2) var(--gw-s3); }
+[${STYLE_ATTR}] .gw-pane-note {
 	display: flex; align-items: flex-start; gap: var(--gw-s2);
-	padding: var(--gw-s2) var(--gw-s3);
-	border-radius: var(--dsw-radius-sm);
-	border: 1px solid var(--dsw-alias-border-l2);
-	background: var(--dsw-alias-bg-layer-2);
-	color: var(--dsw-alias-label-secondary);
-	font-size: 11.5px; line-height: 1.6;
+	color: var(--dsw-alias-label-tertiary);
+	font-size: 11.5px; line-height: 1.55;
 }
-[${STYLE_ATTR}] .gw-modal-hint .gw-icon { flex: none; margin-top: 2px; color: var(--dsw-alias-state-business-primary); }
+[${STYLE_ATTR}] .gw-pane-note .gw-icon {
+	flex: none; margin-top: 2px;
+	color: var(--dsw-alias-state-business-primary);
+}
 [${STYLE_ATTR}] .gw-field { display: flex; flex-direction: column; gap: 6px; }
 [${STYLE_ATTR}] .gw-field-label {
 	display: flex; align-items: baseline; gap: var(--gw-s2);
@@ -1232,17 +1253,16 @@ window.__ModuleLoader__.load({
 @media (max-width: 900px) {
 	[${STYLE_ATTR}] .gw-pick-grid { grid-template-columns: minmax(0, 1fr); }
 	[${STYLE_ATTR}] .gw-modal { max-height: 100%; }
+	/* Single column here, so the two lists no longer share a height and a fixed
+	   cap is again the right tool: without it either list would dominate. */
 	[${STYLE_ATTR}] .gw-pick-list { max-height: 220px; }
 	[${STYLE_ATTR}] .gw-chain-list { max-height: 180px; }
-}
-
-@media (max-width: 900px) {
 	[${STYLE_ATTR}] .gw-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	[${STYLE_ATTR}] .gw-picks { grid-template-columns: minmax(0, 1fr); }
 	[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 64px minmax(0, 1fr) 88px; }
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(4),
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(5) { display: none; }
-	[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 118px minmax(0, 1fr) 90px 52px; }
+	[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 118px minmax(0, 1fr) 90px 112px; }
 	[${STYLE_ATTR}] .gw-kv { align-items: flex-start; flex-direction: column; }
 	[${STYLE_ATTR}] .gw-kv-ctl { max-width: 100%; width: 100%; }
 	/* Stacked, the row is free to wrap the address onto its own line rather than
@@ -2434,6 +2454,23 @@ window.__ModuleLoader__.load({
 												fill(t("routes.targetCount"), { count: current.targets.length }),
 											),
 										),
+										/* The picking pane above spends two rows on its search box and
+										   provider chips, so without a matching block here the two
+										   panes had the same height but very different contents: the
+										   chain started right under its header and any short chain left
+										   a tall blank column on the right. This strip carries the
+										   ordering rule instead, which removes the asymmetry and puts
+										   the explanation where the order itself lives. */
+										h(
+											"div",
+											{ className: "gw-pane-tools is-flush" },
+											h(
+												"div",
+												{ className: "gw-pane-note" },
+												h("span", { className: "gw-icon" }, infoIcon()),
+												h("span", null, t("routes.orderHint")),
+											),
+										),
 										h(
 											"div",
 											{ className: "gw-chain-list" },
@@ -2444,15 +2481,25 @@ window.__ModuleLoader__.load({
 														h("b", null, t("routes.noTargets")),
 														t("routes.noTargetsHint"),
 													)
-												: current.targets.map(chainRow),
+												: [
+														...current.targets.map(chainRow),
+														/* A short chain cannot fill this pane, and a bare
+														   gap under two rows reads as a rendering fault
+														   rather than as a complete list. One quiet line
+														   under the last row names the next action. It is
+														   decorative, so it is not focusable and carries no
+														   state; it disappears once the chain is long
+														   enough to fill the pane on its own. */
+														current.targets.length < 4
+															? h(
+																	"div",
+																	{ className: "gw-chain-more", key: "more" },
+																	t("routes.addMore"),
+																)
+															: null,
+													],
 										),
 									),
-								),
-								h(
-									"div",
-									{ className: "gw-modal-hint" },
-									h("span", { className: "gw-icon" }, infoIcon()),
-									h("span", null, t("routes.orderHint")),
 								),
 							),
 							h(
