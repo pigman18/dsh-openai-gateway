@@ -385,10 +385,20 @@ window.__ModuleLoader__.load({
 		 * `tests/style-tokens.spec.mjs` fails the build if one appears.
 		 */
 		const CSS = `
-[${STYLE_ATTR}] { display: block; height: 100%; overflow: auto; }
+[${STYLE_ATTR}] {
+	/* The spacing ladder. Declared on the scope attribute itself, not on
+	   .gw-page: the route editor is portalled to document.body, which is outside
+	   .gw-page, so anything declared there resolves to nothing inside the dialog
+	   and every var() padding collapses to 0. The scrim carries this attribute
+	   itself, so declaring here reaches both the page and the portal. */
+	--gw-s1: 4px; --gw-s2: 8px; --gw-s3: 12px; --gw-s4: 16px; --gw-s5: 24px; --gw-s6: 32px;
+	/* Control-height ladder. One height per role instead of a height per
+	   component, so a row of mixed controls lines up by construction. */
+	--gw-ctl-h: 28px; --gw-ctl-h-sm: 24px; --gw-ctl-h-xs: 22px;
+	display: block; height: 100%; overflow: auto;
+}
 [${STYLE_ATTR}] * { box-sizing: border-box; }
 [${STYLE_ATTR}] .gw-page {
-	--gw-s1: 4px; --gw-s2: 8px; --gw-s3: 12px; --gw-s4: 16px; --gw-s5: 24px; --gw-s6: 32px;
 	max-width: 1040px; margin: 0 auto; padding: 0 var(--gw-s5) 56px;
 	color: var(--dsw-alias-label-primary);
 	font: var(--dsw-font-xs-13);
@@ -434,10 +444,15 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-dot.is-bad { background: var(--dsw-alias-state-error-primary); }
 [${STYLE_ATTR}] .gw-dot.is-warn { background: var(--dsw-alias-state-warn-primary); }
 
-/* ---- buttons ---- */
+/* ---- buttons ----
+   Heights come from the --gw-ctl-* ladder rather than from padding, so a button
+   beside an input or a chip is the same height by construction instead of by
+   arithmetic that drifts with font metrics. */
 [${STYLE_ATTR}] .gw-btn {
 	appearance: none; cursor: pointer; font: inherit; font-size: 12px;
-	padding: 4px 11px; border-radius: var(--dsw-radius-sm);
+	display: inline-flex; align-items: center; justify-content: center;
+	height: var(--gw-ctl-h); padding: 0 12px;
+	border-radius: var(--dsw-radius-sm);
 	border: 1px solid var(--dsw-alias-border-l3);
 	background: var(--dsw-alias-bg-layer-1);
 	color: var(--dsw-alias-label-primary);
@@ -460,7 +475,7 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-btn.is-quiet:hover { background: var(--dsw-alias-interactive-bg-hover); }
 [${STYLE_ATTR}] .gw-btn.is-danger { color: var(--dsw-alias-state-error-primary); border-color: transparent; background: transparent; }
 [${STYLE_ATTR}] .gw-btn.is-danger:hover { background: var(--dsw-alias-interactive-bg-hover); }
-[${STYLE_ATTR}] .gw-btn.is-sm { padding: 2px 9px; font-size: 11.5px; }
+[${STYLE_ATTR}] .gw-btn.is-sm { height: var(--gw-ctl-h-sm); padding: 0 10px; font-size: 11.5px; }
 
 /* ---- tab bar: a segmented control, one panel per tab ---- */
 [${STYLE_ATTR}] .gw-tabs {
@@ -473,11 +488,11 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-tab {
 	appearance: none; font: inherit; cursor: pointer; flex: 1 1 0;
 	display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+	height: var(--gw-ctl-h); padding: 0 8px;
 	border: 0; border-radius: var(--dsw-radius-sm);
-	padding: 6px 8px;
 	background: transparent;
 	color: var(--dsw-alias-label-tertiary);
-	font-size: 12.5px; font-weight: 500; line-height: 18px;
+	font-size: 12.5px; font-weight: 500;
 	white-space: nowrap;
 	transition: color .15s ease, background .15s ease;
 }
@@ -599,7 +614,7 @@ window.__ModuleLoader__.load({
 }
 [${STYLE_ATTR}] .gw-trow {
 	display: grid; align-items: center; gap: var(--gw-s3);
-	padding: 7px var(--gw-s4);
+	padding: var(--gw-s2) var(--gw-s4);
 	font-size: 12px;
 }
 [${STYLE_ATTR}] .gw-trow + .gw-trow { border-top: 1px solid var(--dsw-alias-border-l1); }
@@ -617,7 +632,12 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 72px minmax(0, 1.6fr) 96px 104px 64px; }
 
 /* route grid: name / chain / health / actions */
-[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 150px minmax(0, 1fr) 106px 58px; }
+[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 150px minmax(0, 1fr) 106px 116px; }
+/* A route row is as tall as its chain, so centring its cells would strand the
+   name and the health badge halfway down a nine-target row while the actions
+   sat at the top. Every cell starts at the first hop instead. */
+[${STYLE_ATTR}] .gw-tbody > .gw-grid-route { align-items: start; }
+[${STYLE_ATTR}] .gw-tbody > .gw-grid-route > .gw-tcell { padding-top: 2px; }
 
 /* ---- route rows ---- */
 [${STYLE_ATTR}] .gw-route-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
@@ -626,6 +646,15 @@ window.__ModuleLoader__.load({
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 [${STYLE_ATTR}] .gw-route-name small { color: var(--dsw-alias-label-caption); font-size: 11px; }
+/* The row actions sit side by side and stay on the row's optical centre. Without
+   an explicit flex they stack as block boxes, which pushed 编辑 and 删除 onto two
+   lines and made the last column look detached from the row it belongs to.
+   The row is top-aligned (see .gw-grid-route), so the buttons line up with the
+   first hop without needing a nudge. */
+[${STYLE_ATTR}] .gw-row-actions {
+	display: flex; align-items: center; gap: var(--gw-s2);
+	flex-wrap: nowrap; justify-content: flex-end;
+}
 [${STYLE_ATTR}] .gw-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 [${STYLE_ATTR}] .gw-hop { display: flex; align-items: center; gap: 6px; min-width: 0; }
 [${STYLE_ATTR}] .gw-hop-idx {
@@ -699,7 +728,9 @@ window.__ModuleLoader__.load({
 /* ---- forms ---- */
 [${STYLE_ATTR}] .gw-input {
 	font: inherit; font-size: 12px; min-width: 0;
-	padding: 4px 9px; border-radius: var(--dsw-radius-sm);
+	/* Same height as .gw-btn, so a button beside a field is level. */
+	height: var(--gw-ctl-h); padding: 0 10px;
+	border-radius: var(--dsw-radius-sm);
 	border: 1px solid var(--dsw-alias-border-l3);
 	background: var(--dsw-alias-bg-base);
 	color: var(--dsw-alias-label-primary);
@@ -824,23 +855,34 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-search .gw-input { flex: 1 1 auto; }
 [${STYLE_ATTR}] .gw-group { border-top: 1px solid var(--dsw-alias-border-l1); }
 [${STYLE_ATTR}] .gw-group:first-of-type { border-top: none; }
+/* The summary and its rows share a left edge and a right edge: the caret column
+   is the indent the rows sit behind, so the group name and the model ids read as
+   one outline rather than two lists that happen to be adjacent. */
 [${STYLE_ATTR}] .gw-group > summary {
 	cursor: pointer; list-style: none;
-	padding: 7px var(--gw-s2);
+	padding: var(--gw-s1) var(--gw-s2) var(--gw-s1) var(--gw-s2);
 	display: flex; align-items: center; justify-content: space-between; gap: var(--gw-s3);
+	min-height: 30px;
 }
 [${STYLE_ATTR}] .gw-group > summary::-webkit-details-marker { display: none; }
 [${STYLE_ATTR}] .gw-group-name {
-	display: flex; align-items: center; gap: 7px;
-	font-size: 12px; font-weight: 600;
+	display: flex; align-items: center; gap: 6px;
+	min-width: 0; font-size: 12px; font-weight: 600;
 }
 [${STYLE_ATTR}] .gw-group-count { color: var(--dsw-alias-label-caption); font-weight: 400; font-size: 11px; font-variant-numeric: tabular-nums; }
-[${STYLE_ATTR}] .gw-caret { color: var(--dsw-alias-label-caption); transition: transform .12s ease; }
+[${STYLE_ATTR}] .gw-caret {
+	display: inline-flex; align-items: center; justify-content: center;
+	width: 14px; flex: none;
+	color: var(--dsw-alias-label-caption); transition: transform .12s ease;
+}
 [${STYLE_ATTR}] .gw-group[open] .gw-caret { transform: rotate(90deg); }
 [${STYLE_ATTR}] .gw-row {
 	display: flex; align-items: center; gap: var(--gw-s3);
-	padding: 4px var(--gw-s2) 4px var(--gw-s5);
+	/* 14px caret + 6px gap puts the id under the provider name, not under the
+	   caret, which is what makes the outline legible at a glance. */
+	padding: var(--gw-s1) var(--gw-s2) var(--gw-s1) 28px;
 	border-radius: var(--dsw-radius-xs);
+	min-height: 30px;
 }
 [${STYLE_ATTR}] .gw-row:hover { background: var(--dsw-alias-interactive-bg-hover); }
 [${STYLE_ATTR}] .gw-row-id {
@@ -892,7 +934,10 @@ window.__ModuleLoader__.load({
 	position: fixed; inset: 0; z-index: 60;
 	display: flex; align-items: center; justify-content: center;
 	height: auto; overflow: visible;
-	padding: var(--gw-s5);
+	/* Breathing room around the dialog. 32px top and bottom means a tall dialog
+	   never touches the viewport edge, which is what makes it read as a sheet
+	   floating over the page rather than a full-screen replacement. */
+	padding: var(--gw-s6);
 	background: var(--dsw-alias-bg-mask-1);
 }
 [${STYLE_ATTR}] .gw-modal {
@@ -908,34 +953,40 @@ window.__ModuleLoader__.load({
 	box-shadow: var(--dsw-shadow-lv3);
 	color: var(--dsw-alias-label-primary);
 	font: var(--dsw-font-xs-13);
+	/* Clips the head and foot backgrounds to the rounded corners, so neither
+	   needs its own matching radius. */
+	overflow: hidden;
 }
 [${STYLE_ATTR}] .gw-modal-head {
 	display: flex; align-items: center; justify-content: space-between; gap: var(--gw-s3);
 	flex: none;
-	padding: var(--gw-s3) var(--gw-s4);
+	padding: var(--gw-s3) var(--gw-s5);
 	border-bottom: 1px solid var(--dsw-alias-border-l1);
 	background: var(--dsw-alias-bg-layer-2);
-	border-radius: var(--dsw-radius-lg) var(--dsw-radius-lg) 0 0;
 }
 [${STYLE_ATTR}] .gw-modal-title { font: var(--dsw-font-s-14); font-weight: 600; }
 [${STYLE_ATTR}] .gw-modal-body {
-	display: flex; flex-direction: column; gap: var(--gw-s3);
+	display: flex; flex-direction: column; gap: var(--gw-s4);
 	min-height: 0; overflow-y: auto;
-	padding: var(--gw-s4);
+	/* The dialog's own gutter. The head and foot use the same 24px so the title,
+	   the panes, and the footer buttons all hang off one vertical line. */
+	padding: var(--gw-s4) var(--gw-s5);
 }
 [${STYLE_ATTR}] .gw-modal-foot {
-	display: flex; align-items: center; justify-content: space-between; gap: var(--gw-s3);
+	display: flex; align-items: center; justify-content: space-between; gap: var(--gw-s4);
 	flex: none;
-	padding: var(--gw-s3) var(--gw-s4);
+	padding: var(--gw-s3) var(--gw-s5);
 	border-top: 1px solid var(--dsw-alias-border-l1);
 	background: var(--dsw-alias-bg-layer-2);
-	border-radius: 0 0 var(--dsw-radius-lg) var(--dsw-radius-lg);
 }
 [${STYLE_ATTR}] .gw-modal-note {
-	min-width: 0; color: var(--dsw-alias-label-tertiary); font-size: 11.5px;
+	min-width: 0; color: var(--dsw-alias-label-tertiary); font-size: 12px;
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 [${STYLE_ATTR}] .gw-modal-actions { display: flex; align-items: center; gap: var(--gw-s2); flex: none; }
+/* The two decision buttons are the primary pair on the surface, so they get one
+   step more presence than the header's quiet close link. */
+[${STYLE_ATTR}] .gw-modal-actions .gw-btn { padding: 0 16px; }
 
 /* Two panes side by side; stretched so the shorter one does not leave a hole. */
 [${STYLE_ATTR}] .gw-pick-grid {
@@ -952,7 +1003,8 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-pane-head {
 	display: flex; align-items: center; justify-content: space-between; gap: var(--gw-s2);
 	flex: none;
-	padding: 7px 10px;
+	padding: 0 var(--gw-s3);
+	height: 34px;
 	border-bottom: 1px solid var(--dsw-alias-border-l1);
 	background: var(--dsw-alias-bg-layer-2);
 	font-size: 11.5px; font-weight: 600;
@@ -962,15 +1014,16 @@ window.__ModuleLoader__.load({
 	font-variant-numeric: tabular-nums;
 }
 [${STYLE_ATTR}] .gw-pane-tools {
-	display: flex; flex-direction: column; gap: 7px;
-	flex: none; padding: var(--gw-s2) 10px;
+	display: flex; flex-direction: column; gap: var(--gw-s2);
+	flex: none; padding: var(--gw-s2) var(--gw-s3);
 	border-bottom: 1px solid var(--dsw-alias-border-l1);
 }
 [${STYLE_ATTR}] .gw-pane-tools .gw-input { width: 100%; }
-[${STYLE_ATTR}] .gw-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+[${STYLE_ATTR}] .gw-chips { display: flex; flex-wrap: wrap; gap: var(--gw-s1); }
 [${STYLE_ATTR}] .gw-chip {
 	appearance: none; cursor: pointer; font: inherit; font-size: 11px;
-	padding: 2px 8px; border-radius: 999px;
+	display: inline-flex; align-items: center;
+	height: var(--gw-ctl-h-xs); padding: 0 9px; border-radius: 999px;
 	border: 1px solid var(--dsw-alias-border-l2);
 	background: var(--dsw-alias-bg-layer-1);
 	color: var(--dsw-alias-label-tertiary);
@@ -997,9 +1050,9 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-pick-group + .gw-pick-group { border-top: 1px solid var(--dsw-alias-border-l1); }
 [${STYLE_ATTR}] .gw-pick-group-head {
 	position: sticky; top: 0; z-index: 1;
-	display: flex; align-items: center; gap: 7px;
+	display: flex; align-items: center; gap: var(--gw-s2);
 	width: 100%; box-sizing: border-box;
-	padding: 5px 10px;
+	height: 28px; padding: 0 var(--gw-s3);
 	border: 0; border-bottom: 1px solid var(--dsw-alias-border-l1);
 	background: var(--dsw-alias-bg-layer-2);
 	color: inherit; font: inherit; font-size: 11px; font-weight: 600;
@@ -1023,7 +1076,8 @@ window.__ModuleLoader__.load({
 	flex: none; margin-left: auto;
 	appearance: none; cursor: pointer; font: inherit;
 	font-size: 10.5px; font-weight: 500;
-	padding: 0 6px; border-radius: var(--dsw-radius-xs);
+	display: inline-flex; align-items: center;
+	height: 18px; padding: 0 7px; border-radius: var(--dsw-radius-xs);
 	border: 1px solid var(--dsw-alias-border-l2);
 	background: var(--dsw-alias-bg-layer-1);
 	color: var(--dsw-alias-label-tertiary);
@@ -1041,7 +1095,7 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-opt {
 	display: flex; align-items: center; gap: var(--gw-s2);
 	width: 100%; box-sizing: border-box;
-	min-width: 0; padding: 5px 10px 5px 12px;
+	min-width: 0; padding: 6px var(--gw-s3);
 	border: 0; background: transparent;
 	color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
@@ -1100,7 +1154,7 @@ window.__ModuleLoader__.load({
 }
 [${STYLE_ATTR}] .gw-chain-item {
 	display: flex; align-items: center; gap: var(--gw-s2);
-	min-width: 0; padding: 7px 10px;
+	min-width: 0; padding: var(--gw-s2) var(--gw-s3);
 }
 [${STYLE_ATTR}] .gw-chain-item + .gw-chain-item { border-top: 1px solid var(--dsw-alias-border-l1); }
 [${STYLE_ATTR}] .gw-chain-item.is-dragging { opacity: .4; }
@@ -1124,10 +1178,10 @@ window.__ModuleLoader__.load({
 	color: var(--dsw-alias-label-caption); font-size: 11px;
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-[${STYLE_ATTR}] .gw-chain-tools { display: flex; gap: 2px; flex: none; }
+[${STYLE_ATTR}] .gw-chain-tools { display: flex; gap: var(--gw-s1); flex: none; }
 [${STYLE_ATTR}] .gw-icon-btn {
 	appearance: none; cursor: pointer; font: inherit; font-size: 11px;
-	width: 20px; height: 20px; padding: 0;
+	width: var(--gw-ctl-h-sm); height: var(--gw-ctl-h-sm); padding: 0;
 	display: grid; place-items: center;
 	border-radius: var(--dsw-radius-xs);
 	border: 1px solid var(--dsw-alias-border-l2);
@@ -1146,29 +1200,29 @@ window.__ModuleLoader__.load({
 }
 [${STYLE_ATTR}] .gw-chain-empty,
 [${STYLE_ATTR}] .gw-pick-empty {
-	padding: var(--gw-s5) var(--gw-s4);
-	text-align: center; font-size: 11.5px; line-height: 1.7;
+	padding: var(--gw-s6) var(--gw-s4);
+	text-align: center; font-size: 12px; line-height: 1.7;
 	color: var(--dsw-alias-label-tertiary);
 }
 [${STYLE_ATTR}] .gw-chain-empty b,
 [${STYLE_ATTR}] .gw-pick-empty b {
-	display: block; margin-bottom: 2px;
-	font-size: 12px; font-weight: 600;
+	display: block; margin-bottom: var(--gw-s1);
+	font-size: 12.5px; font-weight: 600;
 	color: var(--dsw-alias-label-secondary);
 }
 [${STYLE_ATTR}] .gw-modal-hint {
-	display: flex; gap: 9px;
-	padding: 9px 11px;
+	display: flex; align-items: flex-start; gap: var(--gw-s2);
+	padding: var(--gw-s2) var(--gw-s3);
 	border-radius: var(--dsw-radius-sm);
 	border: 1px solid var(--dsw-alias-border-l2);
 	background: var(--dsw-alias-bg-layer-2);
 	color: var(--dsw-alias-label-secondary);
 	font-size: 11.5px; line-height: 1.6;
 }
-[${STYLE_ATTR}] .gw-modal-hint .gw-icon { flex: none; color: var(--dsw-alias-state-business-primary); }
-[${STYLE_ATTR}] .gw-field { display: flex; flex-direction: column; gap: 5px; }
+[${STYLE_ATTR}] .gw-modal-hint .gw-icon { flex: none; margin-top: 2px; color: var(--dsw-alias-state-business-primary); }
+[${STYLE_ATTR}] .gw-field { display: flex; flex-direction: column; gap: 6px; }
 [${STYLE_ATTR}] .gw-field-label {
-	display: flex; align-items: baseline; gap: 6px;
+	display: flex; align-items: baseline; gap: var(--gw-s2);
 	font-size: 12px; font-weight: 600;
 }
 [${STYLE_ATTR}] .gw-field-label span {
@@ -2808,7 +2862,7 @@ window.__ModuleLoader__.load({
 															"button",
 															{
 																type: "button",
-																className: "gw-btn is-sm is-quiet",
+																className: "gw-btn is-sm",
 																onClick: (event) => {
 																	event.preventDefault();
 																	event.stopPropagation();
