@@ -27,7 +27,10 @@ const here = dirname(fileURLToPath(import.meta.url))
  * is invoked, which is what React does. Setting `HOOKS.status` before a render
  * is exactly what "the page loaded that document" means here.
  */
-const HOOKS = { status: null, slots: [] }
+const HOOKS = { status: null, slots: [], openEditor: null }
+
+/** The route editor's position in the page's `useState` call order. */
+const EDITOR_SLOT = 8
 
 const react = {
   createElement: (type, props, ...children) => ({ type, props: props ?? {}, children: children.flat() }),
@@ -37,12 +40,18 @@ const react = {
   },
   useState: (initial) => {
     const index = HOOKS.slots.length
-    const value =
+    let value =
       index === 0 && HOOKS.status !== null
         ? HOOKS.status
         : typeof initial === 'function'
           ? initial()
           : initial
+    // `HOOKS.openEditor` stands in for pressing a row's Edit button. The route
+    // editor is declared eighth (see the slot order in client.js: status,
+    // failed, copied, revealed, portDraft, notice, confirmKey, aliasDraftRows,
+    // editor). Matching on index rather than on "the first null" avoids being
+    // consumed by an earlier null slot such as `notice`.
+    if (index === EDITOR_SLOT && HOOKS.openEditor !== null) value = HOOKS.openEditor
     HOOKS.slots.push(value)
     return [value, () => {}]
   },
@@ -752,6 +761,64 @@ await check('the port field is wide enough to show a real port', () => {
     /width:\s*"(7[0-9]|8[0-9]|9[0-9]|1[0-9][0-9])px"/.test(page),
     'the port input needs an explicit width wide enough for four digits',
   )
+})
+
+await check('a stale target is labelled on the routes tab', () => {
+  /* The row a request would waste a round-trip on has to be visible before the
+     request happens. The host reports `unavailable` per alias; the page turns
+     that into a badge on the hop and a count on the row. */
+  const tree = render({
+    ...STATUS,
+    aliases: [
+      { alias: 'flash', targets: ['gone/retired', 'provider-a/only-a'], unavailable: ['gone/retired'] },
+    ],
+    failover: { cooldownMs: 300000, cooling: [] },
+  })
+  const text = collect(tree)
+  assert.ok(text.includes('routes.unavailable'), 'the stale hop carries no unavailable label')
+  assert.ok(text.includes('routes.goneCount'), 'the row does not summarise how many targets are stale')
+  assert.ok(classes(tree).has('is-gone'), 'the unavailable badge style is missing')
+  /* The live target must not be marked, or the badge would be noise. */
+  const stale = text.filter((entry) => entry === 'routes.unavailable').length
+  assert.equal(stale, 1, `expected exactly one stale badge, saw ${stale}`)
+})
+
+await check('a stale target is labelled inside the route editor too', () => {
+  /* Editing is what fixes a stale row, so the editor has to show it. The stub
+     renders one pass with inert setters, so the modal is opened by seeding its
+     state slot through `HOOKS.openEditor`, which stands in for pressing Edit. */
+  HOOKS.openEditor = {
+    kind: 'edit',
+    original: 'flash',
+    name: 'flash',
+    targets: ['gone/retired', 'provider-a/only-a'],
+    query: '',
+    provider: '',
+    open: new Set(),
+    drag: null,
+    drop: null,
+  }
+  try {
+    const tree = render({
+      ...STATUS,
+      aliases: [
+        { alias: 'flash', targets: ['gone/retired', 'provider-a/only-a'], unavailable: ['gone/retired'] },
+      ],
+      failover: { cooldownMs: 300000, cooling: [] },
+    })
+    assert.ok(classes(tree).has('gw-modal'), 'the editor did not open')
+    const text = collect(tree)
+    assert.ok(
+      text.includes('routes.unavailableMeta'),
+      `the editor does not flag the stale target; saw: ${text.join(' ').slice(0, 240)}`,
+    )
+    assert.ok(
+      text.includes('routes.unavailable'),
+      'the editor chain row carries no unavailable badge',
+    )
+  } finally {
+    HOOKS.openEditor = null
+  }
 })
 
 const failed = results.filter((entry) => !entry.ok)

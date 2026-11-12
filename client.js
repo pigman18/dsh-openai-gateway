@@ -170,6 +170,10 @@ window.__ModuleLoader__.load({
 			"routes.moveUp": "上移",
 			"routes.moveDown": "下移",
 			"routes.removeTarget": "移除",
+			"routes.unavailable": "失效",
+			"routes.unavailableHint": "这个 provider 或模型已经不在当前目录里，请求会直接跳过它。编辑路由换成现存的目标。",
+			"routes.unavailableMeta": "已失效，不会生效，建议移除或替换",
+			"routes.goneCount": "{count} 个已失效",
 			"cool.title": "冷却中",
 			"cool.summary": "{count} 个目标正在冷却，最近一个还有 {seconds}s 恢复。冷却期间请求直接跳过它，不会先失败一次。",
 			"cool.none": "所有目标都可用",
@@ -340,6 +344,10 @@ window.__ModuleLoader__.load({
 			"routes.moveUp": "Move up",
 			"routes.moveDown": "Move down",
 			"routes.removeTarget": "Remove",
+			"routes.unavailable": "Unavailable",
+			"routes.unavailableHint": "This provider or model is no longer in the catalogue, so requests skip it. Edit the route to use a live target.",
+			"routes.unavailableMeta": "no longer available — remove or replace it",
+			"routes.goneCount": "{count} unavailable",
 			"cool.title": "Cooling down",
 			"cool.summary": "{count} targets are benched; the next recovers in {seconds}s. Requests skip them instead of failing once first.",
 			"cool.none": "Every target is available",
@@ -725,6 +733,21 @@ window.__ModuleLoader__.load({
 	color: var(--dsw-alias-state-business-primary);
 	border-color: var(--dsw-alias-state-business-primary);
 	background: var(--dsw-alias-state-business-tertiary);
+}
+/* A retired target: it will not recover on its own, so it is marked differently
+   from a benched (temporarily cooling) one. Dashed border reads as "this row is
+   stale" rather than "this row failed". */
+[${STYLE_ATTR}] .gw-badge.is-gone {
+	color: var(--dsw-alias-label-tertiary);
+	border-color: var(--dsw-alias-border-l3);
+	border-style: dashed;
+	background: transparent;
+}
+[${STYLE_ATTR}] .gw-hop.is-gone .gw-hop-id {
+	color: var(--dsw-alias-label-caption);
+	text-decoration: line-through;
+	text-decoration-style: dotted;
+	text-decoration-color: var(--dsw-alias-border-l3);
 }
 
 /* ---- forms ---- */
@@ -1184,6 +1207,7 @@ window.__ModuleLoader__.load({
 	display: inline-flex; align-items: center;
 }
 [${STYLE_ATTR}] .gw-chain-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+[${STYLE_ATTR}] .gw-chain-id-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
 [${STYLE_ATTR}] .gw-chain-id {
 	font-family: var(--dsw-font-mono); font-size: 12px;
 	/* Model ids run past 60 characters, and the chain column is only half the
@@ -1533,6 +1557,18 @@ window.__ModuleLoader__.load({
 				(target) => coolingList.find((entry) => entry.target === target),
 				[coolingList],
 			);
+
+			// Targets the live catalogue no longer advertises — a renamed provider or
+			// a retired model. The host computes this because only it can see the
+			// catalogue, and a stale row is otherwise invisible until a request
+			// spends a round-trip discovering it. Rebuilt per render rather than
+			// memoized: the table is a handful of rows, and an optional hook would
+			// be one more thing a host could fail to provide.
+			const unavailableSet = new Set();
+			for (const row of Array.isArray(status?.aliases) ? status.aliases : []) {
+				for (const target of Array.isArray(row.unavailable) ? row.unavailable : []) unavailableSet.add(target);
+			}
+			const isUnavailable = (target) => unavailableSet.has(target);
 			// Rows arrive in one shape from the host (`{alias, targets}`) and in the
 			// same shape from the local draft, so nothing has to branch on origin.
 			// A row written by an older build carried a single `target` string;
@@ -2083,15 +2119,24 @@ window.__ModuleLoader__.load({
 			const routeHop = (target, index) => {
 				const cooling = coolingFor(target);
 				const coolingNow = cooling !== undefined;
+				const gone = isUnavailable(target);
 				const remaining = coolingNow ? Math.max(0, Math.ceil(cooling.remainingMs / 1000)) : 0;
 				const cooldown = Number.isFinite(status?.failover?.cooldownMs) ? status.failover.cooldownMs : 300000;
 				const share = coolingNow ? Math.max(0, Math.min(1, cooling.remainingMs / cooldown)) : 0;
 				return h(
 					"div",
-					{ className: `gw-hop ${coolingNow ? "is-cooling" : ""}`, key: target },
+					{ className: `gw-hop ${coolingNow ? "is-cooling" : ""} ${gone ? "is-gone" : ""}`, key: target },
 					h("span", { className: `gw-hop-idx ${index === 0 ? "is-first" : ""}` }, String(index + 1)),
 					h("span", { className: "gw-hop-id", title: target }, target),
-					coolingNow
+					// A retired target is the more useful fact than its cooldown: it will
+					// never recover on its own, so it keeps the label even while cooling.
+					gone
+						? h(
+								"span",
+								{ className: "gw-hop-side" },
+								h("span", { className: "gw-badge is-gone", title: t("routes.unavailableHint") }, t("routes.unavailable")),
+							)
+						: coolingNow
 						? h(
 								"span",
 								{ className: "gw-hop-side" },
@@ -2276,11 +2321,24 @@ window.__ModuleLoader__.load({
 						h(
 							"div",
 							{ className: "gw-chain-main" },
-							h("span", { className: "gw-chain-id", title: id }, id),
+							h(
+								"span",
+								{ className: "gw-chain-id-row" },
+								h("span", { className: "gw-chain-id", title: id }, id),
+								// The editor is where a stale row gets fixed, so the label has to
+								// be visible here and not only on the page behind the modal.
+								isUnavailable(id)
+									? h("span", { className: "gw-badge is-gone", title: t("routes.unavailableHint") }, t("routes.unavailable"))
+									: null,
+							),
 							h(
 								"span",
 								{ className: "gw-chain-meta" },
-								index === 0 ? t("routes.primaryHint") : fill(t("routes.fallbackHint"), { index: index + 1 }),
+								isUnavailable(id)
+									? t("routes.unavailableMeta")
+									: index === 0
+										? t("routes.primaryHint")
+										: fill(t("routes.fallbackHint"), { index: index + 1 }),
 							),
 						),
 						h(
@@ -2595,6 +2653,16 @@ window.__ModuleLoader__.load({
 										{ className: "gw-tbody" },
 										aliasRows.map((row) => {
 											const benched = row.targets.filter((target) => coolingFor(target) !== undefined).length;
+											const gone = row.targets.filter((target) => isUnavailable(target)).length;
+											// A dead target outranks a cooling one: cooling recovers by
+											// itself, a stale row needs the user to edit it.
+											const tone = gone > 0 ? "is-bad" : benched === 0 ? "is-ok" : "is-warn";
+											const health =
+												gone > 0
+													? fill(t("routes.goneCount"), { count: gone })
+													: benched === 0
+														? t("routes.healthy")
+														: fill(t("routes.bench"), { count: benched });
 											return h(
 												"div",
 												{ className: "gw-trow gw-grid-route", key: row.alias },
@@ -2608,13 +2676,7 @@ window.__ModuleLoader__.load({
 												h(
 													"div",
 													{ className: "gw-tcell" },
-													h(
-														"span",
-														{ className: `gw-badge ${benched === 0 ? "is-ok" : "is-warn"}` },
-														benched === 0
-															? t("routes.healthy")
-															: fill(t("routes.bench"), { count: benched }),
-													),
+													h("span", { className: `gw-badge ${tone}` }, health),
 												),
 												h(
 													"div",

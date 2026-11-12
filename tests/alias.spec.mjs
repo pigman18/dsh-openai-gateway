@@ -10,7 +10,7 @@
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { apply } from '../index.js'
@@ -206,6 +206,108 @@ try {
 } finally {
   gateway.stop()
 }
+
+await check('a page save survives a reload that also has bundle aliases', async () => {
+  /* The reported bug. A profile pinned two aliases in YAML (gpt-4o,
+     claude-sonnet-5.5) and the user then added routes from the page. Every
+     reload threw the page's work away and restored the YAML pair, so routes
+     looked like they reset themselves for no reason.
+     A save is more specific than a static config file, so the stored table has
+     to win once it exists; the bundle config only seeds a fresh install. */
+  const home = mkdtempSync(join(tmpdir(), 'dsh-gw-save-vs-yaml-'))
+  process.env.DSH_HOME = home
+  try {
+    const bundleAliases = { 'gpt-4o': 'provider-a/only-a' }
+
+    // First boot: nothing stored yet, so the bundle config seeds the table.
+    const ctx1 = fakeCtx(fakeLlm())
+    const first = apply(ctx1, { port: await freePort(), aliases: bundleAliases })
+    const port = await waitForPort(first)
+    assert.deepEqual(
+      first.store.aliases,
+      { 'gpt-4o': ['provider-a/only-a'] },
+      'the bundle aliases did not seed a fresh install',
+    )
+
+    // The page then writes what the user picked.
+    const file = join(home, 'openai-gateway', 'settings.json')
+    const settings = JSON.parse(readFileSync(file, 'utf8'))
+    settings.aliases = { 'page-route': ['provider-b/shared-model'] }
+    writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`)
+    ctx1.disposeAll()
+
+    // Second boot with the SAME bundle config still present.
+    const ctx2 = fakeCtx(fakeLlm())
+    const second = apply(ctx2, { port, aliases: bundleAliases })
+    await waitForPort(second)
+    try {
+      assert.deepEqual(
+        second.store.aliases,
+        { 'page-route': ['provider-b/shared-model'] },
+        'the reload restored the bundle aliases and discarded the page save',
+      )
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(second.store.aliases, 'gpt-4o'),
+        false,
+        'the stale bundle alias came back after a page save',
+      )
+    } finally {
+      ctx2.disposeAll()
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await check('removing the stored alias table falls back to the bundle config', async () => {
+  /* The fallback has to stay reachable, otherwise the bundle config becomes
+     write-only. Deleting the key from settings.json is the documented reset. */
+  const home = mkdtempSync(join(tmpdir(), 'dsh-gw-yaml-reset-'))
+  process.env.DSH_HOME = home
+  try {
+    const bundleAliases = { 'from-yaml': 'provider-a/only-a' }
+    const ctx1 = fakeCtx(fakeLlm())
+    const first = apply(ctx1, { port: await freePort(), aliases: bundleAliases })
+    const port = await waitForPort(first)
+    ctx1.disposeAll()
+
+    // Pretend the page saved something different.
+    const file = join(home, 'openai-gateway', 'settings.json')
+    const settings = JSON.parse(readFileSync(file, 'utf8'))
+    settings.aliases = { 'from-page': ['provider-a/only-a'] }
+    writeFileSync(file, `${JSON.stringify(settings, null, 2)}\n`)
+
+    const ctx2 = fakeCtx(fakeLlm())
+    const second = apply(ctx2, { port, aliases: bundleAliases })
+    await waitForPort(second)
+    assert.deepEqual(
+      second.store.aliases,
+      { 'from-page': ['provider-a/only-a'] },
+      'the stored table did not win over the bundle aliases',
+    )
+    ctx2.disposeAll()
+
+    // Reset: drop the alias key, keeping the port and key so the client is intact.
+    const reset = JSON.parse(readFileSync(file, 'utf8'))
+    delete reset.aliases
+    writeFileSync(file, `${JSON.stringify(reset, null, 2)}\n`)
+
+    const ctx3 = fakeCtx(fakeLlm())
+    const third = apply(ctx3, { port, aliases: bundleAliases })
+    await waitForPort(third)
+    try {
+      assert.deepEqual(
+        third.store.aliases,
+        { 'from-yaml': ['provider-a/only-a'] },
+        'the bundle aliases were not used after the stored table was removed',
+      )
+    } finally {
+      ctx3.disposeAll()
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
 
 await check('the alias table is read back on the next boot', async () => {
   const home = mkdtempSync(join(tmpdir(), 'dsh-gw-restart-'))

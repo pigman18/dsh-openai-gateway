@@ -115,16 +115,32 @@ async function waitForPort(state) {
   throw new Error('listener never came up')
 }
 
-/** Boot a gateway with one alias pointing at `targets`, in order. */
+/**
+ * Boot a gateway with one alias pointing at `targets`, in order.
+ *
+ * Each boot gets its own DSH_HOME. The store persists the alias table to
+ * settings.json, and a stored table deliberately outranks the bundle config, so
+ * a shared home would let one check's routes leak into the next — the second
+ * boot would then read the first boot's aliases instead of its own.
+ */
 async function boot(plan, targets, { alias = 'flash' } = {}) {
   const llm = fakeLlm(plan)
   const ctx = fakeCtx(llm)
+  const previousHome = process.env.DSH_HOME
+  const bootHome = mkdtempSync(join(tmpdir(), 'gw-failover-boot-'))
+  process.env.DSH_HOME = bootHome
   const state = apply(ctx, {
     port: await freePort(),
     aliases: { [alias]: targets },
   })
   const port = await waitForPort(state)
-  return { llm, ctx, state, port, alias, stop: () => ctx.disposeAll() }
+  const stop = () => {
+    ctx.disposeAll()
+    rmSync(bootHome, { recursive: true, force: true })
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  }
+  return { llm, ctx, state, port, alias, stop }
 }
 
 function post(port, key, body) {
@@ -460,6 +476,255 @@ await check('the same target listed twice is tried once', async () => {
     assert.deepEqual(llm.calls, ['a/one'])
   } finally {
     ctx.disposeAll()
+  }
+})
+
+/**
+ * Boot a gateway that installs its own `prepareCall`, for the checks that need
+ * an error shape the `plan` helper cannot express. Like `boot`, it gets a
+ * private DSH_HOME so one check's persisted routes cannot leak into another.
+ */
+async function bootCustom(aliases, install) {
+  const llm = fakeLlm({ 'b/two': 'ok' })
+  const ctx = fakeCtx(llm)
+  const previousHome = process.env.DSH_HOME
+  const bootHome = mkdtempSync(join(tmpdir(), 'gw-failover-custom-'))
+  process.env.DSH_HOME = bootHome
+  const state = apply(ctx, { port: await freePort(), aliases })
+  const port = await waitForPort(state)
+  const original = llm.prepareCall
+  llm.prepareCall = install(original)
+  const stop = () => {
+    ctx.disposeAll()
+    rmSync(bootHome, { recursive: true, force: true })
+    if (previousHome === undefined) delete process.env.DSH_HOME
+    else process.env.DSH_HOME = previousHome
+  }
+  return { llm, ctx, state, port, stop }
+}
+
+await check('a bare upstream 429 with no code still reaches the next target', async () => {
+  /* The reported failure, reproduced. The first target is an OpenCode free-tier
+     model whose quota is spent; the adapter surfaces the raw upstream answer
+     with NO `code` at all — only a `status` and the JSON body as `message`:
+
+       429: {"type":"FreeUsageLimitError","message":"Free usage limit reached…"}10000
+
+     `failoverEligible` used to require a recognised `code`, so this was treated
+     as unrecoverable and the healthy target behind it was never tried. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: {
+              status: 429,
+              message:
+                '429: {"type":"FreeUsageLimitError","message":"Free usage limit reached. Free models work in OpenCode (https://opencode.ai); subscribe to OpenCode Go to keep going: https://opencode.ai/go"}10000',
+            },
+          },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `the spent target killed the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:b/two'), 'the healthy target was never tried')
+    assert.deepEqual(app.llm.calls, ['a/one', 'b/two'], `wrong target order: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a quota refusal carrying only text is still failed over', async () => {
+  // Some adapters drop the status too and leave only the sentence behind.
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { message: 'Free usage limit reached. Free models work in OpenCode' },
+          },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `an unlabelled quota refusal stopped the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:b/two'))
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a plain text error that is not a quota failure still stops', async () => {
+  /* The widening must not turn every unlabelled error into a failover. A bare
+     "the model refused" is not about the account, so the next target would
+     answer identically and the route should not be walked. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { message: 'the model refused this prompt' } },
+        }
+      },
+    }
+  })
+  try {
+    await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.deepEqual(
+      app.llm.calls,
+      ['a/one'],
+      `an ordinary error was replayed across targets: ${JSON.stringify(app.llm.calls)}`,
+    )
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a 402 payment refusal is failed over', async () => {
+  // A provider that answers 402 has an account problem, not a request problem.
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield { type: 'finish', reason: { kind: 'error', failure: { status: 402 } } }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `a 402 killed the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:b/two'))
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a target whose provider was renamed does not kill the route', async () => {
+  /* The reported failure, reproduced. The route's first target names a provider
+     the profile no longer registers — `our-free-model` had been re-registered as
+     `opencode-free` — so resolving it answered:
+
+       {"error":{"message":"no adapter registered for provider \"our-free-model\"",
+                 "type":"invalid_request_error","code":"NO_ADAPTER"}}
+
+     `NO_ADAPTER` was absent from FAILOVER_CODES, so the chain stopped there and
+     answered the caller 400 while five healthy targets sat untouched behind it.
+     A stale provider row is the same class of problem as a stale model row. */
+  const app = await bootCustom({ flash: ['gone/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'gone/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('gone/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: {
+              code: 'NO_ADAPTER',
+              message: 'no adapter registered for provider "gone"',
+            },
+          },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `a renamed provider killed the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:b/two'), 'the healthy target was never tried')
+    assert.deepEqual(app.llm.calls, ['gone/one', 'b/two'], `wrong order: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a renamed provider is benched rather than retried every request', async () => {
+  // The stale row costs one round-trip, then sits out like any other dead target.
+  const app = await bootCustom({ flash: ['gone/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'gone/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('gone/one')
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { code: 'NO_ADAPTER', message: 'no adapter registered' } },
+        }
+      },
+    }
+  })
+  try {
+    await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.deepEqual(app.llm.calls, ['gone/one', 'b/two'], 'the first request did not fail over')
+
+    app.llm.calls.length = 0
+    const second = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(second.status, 200, second.text.slice(0, 200))
+    assert.deepEqual(
+      app.llm.calls,
+      ['b/two'],
+      `the dead provider row was tried again: ${JSON.stringify(app.llm.calls)}`,
+    )
+  } finally {
+    app.stop()
+  }
+})
+
+await check('the status document marks targets the catalogue no longer has', async () => {
+  /* The page has to show a stale row before a request discovers it. Only the
+     host can see the catalogue, so it reports the dead targets per alias. */
+  const app = await boot(
+    { 'a/one': 'ok', 'c/three': 'ok' },
+    ['a/one', 'gone/two', 'c/three'],
+  )
+  try {
+    const status = await readStatus(app.ctx.webRoutes)
+    const row = status.aliases.find((entry) => entry.alias === 'flash')
+    assert.ok(row !== undefined, 'the alias row is missing from the status document')
+    assert.deepEqual(
+      row.unavailable,
+      ['gone/two'],
+      `the dead target was not reported: ${JSON.stringify(row.unavailable)}`,
+    )
+    assert.equal(
+      row.targets.length,
+      3,
+      'the dead target must stay in the chain so the page can still show and edit it',
+    )
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a fully live route reports nothing unavailable', async () => {
+  const app = await boot({ 'a/one': 'ok', 'b/two': 'ok' }, ['a/one', 'b/two'])
+  try {
+    const status = await readStatus(app.ctx.webRoutes)
+    const row = status.aliases.find((entry) => entry.alias === 'flash')
+    assert.deepEqual(row.unavailable, [], `a healthy route was flagged: ${JSON.stringify(row.unavailable)}`)
+  } finally {
+    app.stop()
   }
 })
 

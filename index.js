@@ -79,13 +79,17 @@ const FAILOVER_COOLDOWN_MS = 5 * 60_000
  * other target would reject it identically — walking the whole list would just
  * multiply the latency of an answer that is never going to change.
  *
- * UNKNOWN_MODEL is the exception, and it belongs here: a target that names a
- * model the provider no longer advertises says nothing about the caller's
- * payload, and says nothing about the other targets either. It is a stale row in
- * one alias entry. Leaving it out stopped the whole chain: one renamed upstream
- * model made an eight-target route answer 502 without ever trying targets six
- * through eight, which look perfectly healthy on the page. The catalogue drifts
- * whenever a provider renames a model, so this is a routine event, not an
+ * UNKNOWN_MODEL and NO_ADAPTER are the exceptions, and they belong here: a
+ * target that names a model the provider no longer advertises, or a provider
+ * this profile no longer registers, says nothing about the caller's payload and
+ * nothing about the other targets either. Both are stale rows in one alias
+ * entry. Leaving UNKNOWN_MODEL out stopped a whole chain: one renamed upstream
+ * model made an eight-target route answer 502 without ever trying the healthy
+ * targets behind it. Leaving NO_ADAPTER out did the same thing a level higher up
+ * — a provider renamed under the plugin's feet (`our-free-model` becoming
+ * `opencode-free`) had the chain answer the caller 400 "no adapter registered"
+ * while five healthy targets sat untouched behind it. The catalogue drifts
+ * whenever a profile re-registers a provider, so this is a routine event, not an
  * exceptional one.
  */
 const FAILOVER_CODES = new Set([
@@ -97,7 +101,28 @@ const FAILOVER_CODES = new Set([
   'SERVER',
   'EMPTY_RESPONSE',
   'UNKNOWN_MODEL',
+  'NO_ADAPTER',
 ])
+/**
+ * Failures that are about the target's account or quota, recognised from the
+ * text an adapter puts on them rather than from `code`.
+ *
+ * The host treats subscription limits as terminal and does not retry them, so
+ * they surface with whatever code the adapter happened to pick — often none at
+ * all, with the whole `429: {"type":"FreeUsageLimitError",…}` sitting in
+ * `message`. Matching only on `code` therefore dropped the reachable fallback:
+ * a route whose first target had spent its free quota answered the caller with
+ * the upstream 429 and never tried the healthy target behind it.
+ *
+ * These patterns mirror the host's own non-retryable limit list on purpose. A
+ * limited account is exactly the case another target can survive, so the two
+ * agree about what the error *means* while disagreeing about who can fix it —
+ * the host cannot switch accounts, this gateway can.
+ */
+const QUOTA_ERROR_PATTERN =
+  /(?:GoUsageLimitError|FreeUsageLimitError|usage limit reached|usage limit exceeded|quota exceeded|insufficient_quota|available balance|out of budget|insufficient balance|billing|payment required|rate limit|too many requests)/i
+/** Statuses that describe the target, not the caller's payload. */
+const FAILOVER_STATUSES = new Set([402, 408, 425, 429, 500, 502, 503, 504, 529])
 const KEY_PREFIX = 'sk-dsh-'
 /** Service keys for the HTTP surface, newest name first. */
 const WEB_SERVER_KEYS = ['webServer', 'httpServer']
@@ -1127,9 +1152,28 @@ async function resolveRoute(ctx, state, ttl, requested) {
  * advertised: dropping it silently would turn a stale entry into a mystery 404
  * at the client, while keeping it lets the request fail with the adapter's own
  * answer.
+ *
+ * Each target also carries whether the live catalogue still advertises it. The
+ * page cannot work this out on its own — `/v1/models` is on the gateway's own
+ * port while the page is same-origin with the host — and a stale row is
+ * invisible until a request spends a round-trip discovering it. `known: false`
+ * is what puts the "unavailable" badge on that row.
  */
-function aliasEntries(state) {
-  return Object.entries(state.store.aliases).map(([alias, targets]) => ({ alias, targets }))
+function aliasEntries(state, catalogEntries) {
+  // An empty catalogue means "nothing is configured right now", not "every
+  // target is broken": during a cold start the `llm` service may not have
+  // listed anything yet, and flagging the whole table would make the page lie.
+  const live =
+    catalogEntries === undefined || catalogEntries.length === 0
+      ? undefined
+      : new Set(catalogEntries.map((entry) => modelKey(entry)))
+  return Object.entries(state.store.aliases).map(([alias, targets]) => ({
+    alias,
+    targets,
+    // Only reported when a catalogue was actually read, so a cold start does
+    // not claim every target is dead.
+    unavailable: live === undefined ? [] : targets.filter((target) => !live.has(target)),
+  }))
 }
 
 /**
@@ -1208,12 +1252,20 @@ function coolDown(state, target, failure) {
  * A committed stream is never failed over: the caller has already seen part of
  * an answer, and replaying the request elsewhere would either duplicate it or
  * silently replace it with a different one.
+ *
+ * The decision reads `code`, then `status`, then the message. Matching only on
+ * `code` was too narrow: an adapter that surfaces a bare upstream 429 — as the
+ * OpenCode free-tier limit does, with no `code` at all — was treated as
+ * unrecoverable, so the route stopped at the spent target instead of handing
+ * the request to the next one.
  */
 function failoverEligible(failure, { committed }) {
   if (committed) return undefined
   if (failure === undefined || failure === null) return undefined
-  if (typeof failure.code !== 'string' || !FAILOVER_CODES.has(failure.code)) return undefined
-  return failure
+  if (typeof failure.code === 'string' && FAILOVER_CODES.has(failure.code)) return failure
+  if (typeof failure.status === 'number' && FAILOVER_STATUSES.has(failure.status)) return failure
+  if (QUOTA_ERROR_PATTERN.test(messageOf(failure))) return failure
+  return undefined
 }
 
 /** The alias targets to try for `requested`, or `undefined` when it is not one. */
@@ -2029,12 +2081,26 @@ function loadStore(ctx, { portOverride, apiKeyPinned, aliases }) {
       : Number.isFinite(stored.port)
         ? clampPort(stored.port)
         : DEFAULT_PORT
-  // Bundle config aliases win; the stored table is the fallback, so a profile
-  // that pins them in YAML keeps them across a settings write.
+  // Which alias table wins is decided by whether the settings file already
+  // carries one, not by whether the bundle config has one:
+  //
+  //   - no `aliases` in settings.json  -> the bundle config seeds it (a profile
+  //     can pin a starting table in YAML, which is useful on a fresh install)
+  //   - `aliases` present in settings.json -> it wins, because the page wrote it
+  //
+  // The opposite order was a real bug: a profile with two aliases pinned in YAML
+  // silently discarded every route saved from the page on the next reload, so
+  // editing routes appeared to "reset itself" for no visible reason. A save the
+  // user performed is more specific than a static config file, and `saveStore`
+  // only writes the key when the table is non-empty — so clearing the key in the
+  // file is still the documented way to fall back to the bundle config.
+  const storedAliases = normalizeAliases(stored.aliases)
   const aliasTable =
-    aliases !== undefined && Object.keys(aliases).length > 0
-      ? aliases
-      : normalizeAliases(stored.aliases)
+    Object.keys(storedAliases).length > 0
+      ? storedAliases
+      : aliases !== undefined && Object.keys(aliases).length > 0
+        ? aliases
+        : {}
   const store = { path, dir, port, apiKey, aliases: aliasTable, persisted: false }
   saveStore(ctx, store)
   return store
@@ -2596,7 +2662,7 @@ async function statusPayload(ctx, state, ttl, refresh) {
       provider: entry.provider,
       ...(entry.model.name === entry.model.id ? {} : { name: entry.model.name }),
     })),
-    aliases: aliasEntries(state),
+    aliases: aliasEntries(state, entries),
     // Which targets are sitting out right now, and the reason each was benched.
     // Derived from the in-memory cooldown map on every read, so the page never
     // shows a target as unavailable after its cooldown has expired.
