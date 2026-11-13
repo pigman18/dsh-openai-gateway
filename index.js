@@ -59,8 +59,21 @@ const RETRYABLE_CODES = new Set(['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIME
 const SILENT_FLUSH_MS = 10_000
 /** Interval between SSE comments once the stream is committed and quiet. */
 const KEEPALIVE_MS = 15_000
-/** How many finished requests the status document keeps for diagnosis. */
-const RECENT_LIMIT = 20
+/**
+ * How many finished requests the usage log keeps.
+ *
+ * This used to be 20, which was enough for "what just happened" but not for a
+ * dashboard whose counters survive a restart. The cap is a safety valve only:
+ * retention is the 30-day window below, and a busy profile still stays well
+ * under this.
+ */
+const RECENT_LIMIT = 1000
+/** Detail records older than this are dropped. Totals keep counting forever. */
+const USAGE_RETENTION_DAYS = 30
+/** How many detail rows one page of the dashboard shows. */
+const USAGE_PAGE_SIZE = 10
+/** Usage is flushed this long after the last request, so a burst costs one write. */
+const USAGE_FLUSH_MS = 4000
 /**
  * How a route's targets are rotated.
  *
@@ -174,6 +187,15 @@ const KEY_DIRNAME = 'openai-gateway'
 const KEY_FILENAME = 'api-key'
 /** Persisted settings: the listen port and the bearer key. */
 const SETTINGS_FILENAME = 'settings.json'
+/**
+ * Persisted usage: the all-time counters and the retained detail log.
+ *
+ * A separate file from `settings.json` on purpose. Usage changes on every
+ * request while settings change when the user edits something, and rewriting
+ * the whole configuration (routes, keys) every few seconds would put the one
+ * file that must not be corrupted on a hot path.
+ */
+const USAGE_FILENAME = 'usage.json'
 /** Shortest key this gateway will honour, whether stored or generated. */
 const MIN_KEY_LENGTH = 16
 /** Port the gateway prefers; a busy port falls back to an ephemeral one. */
@@ -185,6 +207,8 @@ const SETTINGS_ROUTE = `/plugins/${PLUGIN_ID}/settings`
 const KEY_ROUTE = `/plugins/${PLUGIN_ID}/key`
 const ALIAS_ROUTE = `/plugins/${PLUGIN_ID}/aliases`
 const TUNNEL_ROUTE = `/plugins/${PLUGIN_ID}/tunnel`
+/** Clears the retained detail log. The all-time counters are untouched. */
+const USAGE_ROUTE = `/plugins/${PLUGIN_ID}/usage`
 /** Tunnel providers the plugin can supervise itself. */
 const TUNNEL_PROVIDERS = new Set(['ngrok', 'cloudflared'])
 /** How long a spawned tunnel may take to publish its public URL. */
@@ -268,7 +292,6 @@ export function apply(ctx, config) {
   // An external hostname the caller supplies wins over anything the stored
   // settings or a supervised tunnel later reports.
   const publicBaseUrl = normalizeBaseUrl(settings.publicBaseUrl)
-  const tunnelConfig = resolveTunnelConfig(settings.tunnel)
 
   // Persisted state lives in one plugin-owned file under the Harness home:
   // a configured external client then survives every restart.
@@ -277,6 +300,20 @@ export function apply(ctx, config) {
     apiKeyPinned: typeof settings.apiKey === 'string' ? settings.apiKey.trim() : '',
     aliases: normalizeAliases(settings.aliases),
   })
+
+  // A provider the page last started outranks a static config value, the same
+  // precedence the alias table uses: the user's action is more specific than a
+  // file they may not remember editing. Re-picking ngrok after every restart
+  // was the reported annoyance, so the choice has to live in the store.
+  const configuredTunnel = resolveTunnelConfig(settings.tunnel)
+  const tunnelConfig = {
+    provider: store.tunnel?.provider ?? configuredTunnel.provider,
+    autostart: store.tunnel?.autostart ?? configuredTunnel.autostart,
+  }
+
+  // Counters and the detail log survive a restart. `requests`/`failures` seed
+  // from the same file, so "累计调用" means all-time rather than this process.
+  const usage = loadUsage(store.dir)
 
   const state = {
     store,
@@ -289,22 +326,15 @@ export function apply(ctx, config) {
     retry,
     keepAlive,
     inputGuard,
-    requests: 0,
-    failures: 0,
-    recent: [],
-    // Rolling totals for the dashboard. Deliberately not persisted: these
-    // describe this process's lifetime, which is what "since 09:41" on the
-    // page means. A restart zeroes them along with `requests`.
-    usageTotals: {
-      inputTokens: 0,
-      outputTokens: 0,
-      totalTokens: 0,
-      reasoningTokens: 0,
-      cacheReadTokens: 0,
-      // Only requests that reported usage of their own are counted here, so
-      // this number is the denominator for the token figures beside it.
-      calls: 0,
-    },
+    requests: usage.requests,
+    failures: usage.failures,
+    recent: usage.recent,
+    // All-time counters, restored from disk and flushed once traffic settles.
+    // "累计" is across restarts; the retained detail rows age out after
+    // USAGE_RETENTION_DAYS while these keep counting.
+    usageTotals: usage.totals,
+    usagePersisted: false,
+    usageTimer: undefined,
     // Bytes that crossed the OpenAI surface, in and out. Headers are not
     // counted; bodies and SSE frames are, which is the traffic a tile can
     // honestly report.
@@ -387,7 +417,7 @@ export function apply(ctx, config) {
           // The page is the only caller. `?refresh=1` is what its Refresh
           // button sends: re-read the catalog even when the snapshot is
           // still inside the TTL, so the button does what it says.
-          statusPayload(ctx, state, catalogTtl, refreshRequested(req.url))
+          statusPayload(ctx, state, catalogTtl, refreshRequested(req.url), usagePageRequested(req.url))
             .then((payload) => sendJson(res, 200, payload, { 'Cache-Control': 'no-store' }))
             .catch((error) => fail(res, error))
         },
@@ -420,6 +450,13 @@ export function apply(ctx, config) {
           control(ctx, req, res, () => applyTunnel(ctx, state, req, res, bodyLimit))
         },
       }),
+      webServer.register({
+        kind: 'exact',
+        path: USAGE_ROUTE,
+        handler: (req, res) => {
+          control(ctx, req, res, () => applyUsage(ctx, state, req, res, bodyLimit))
+        },
+      }),
     ]
 
     ctx.effect(
@@ -438,6 +475,10 @@ export function apply(ctx, config) {
 
   ctx.effect(
     () => () => {
+      // Counters are flushed here as well as on the debounce timer: a reload
+      // may cancel the pending timer, and the work done since the last flush
+      // would otherwise be lost exactly when the user is changing plugins.
+      flushUsage(ctx, state)
       stopTunnel(ctx, state)
       closeListener(state)
     },
@@ -1749,6 +1790,9 @@ function recordRequest(ctx, state, trace) {
   // Every request ends here — succeeded, refused, aborted — so this is the one
   // place totals can be accumulated without a second code path to keep in sync.
   addUsageTotals(state.usageTotals, trace.usage)
+  // Persisted once traffic settles rather than per request: the counters have
+  // to survive a restart, but a step's answer must not wait on a disk write.
+  scheduleUsageFlush(ctx, state)
   const where = `${trace.model} ${trace.stream ? 'stream' : 'blocking'} ${trace.ms}ms`
   const why = trace.code === undefined ? '' : ` ${trace.code}: ${String(trace.message ?? '').slice(0, 200)}`
   if (trace.outcome === 'ok') logInfo(ctx, `request ${where}${why}`)
@@ -2336,7 +2380,26 @@ function loadStore(ctx, { portOverride, apiKeyPinned, aliases }) {
       : aliases !== undefined && Object.keys(aliases).length > 0
         ? aliases
         : {}
-  const store = { path, dir, port, keys, aliases: aliasTable, persisted: false }
+  // The tunnel provider the page last started. Persisted because the choice is
+  // a user decision rather than transient state: it has to survive a restart,
+  // which is exactly when re-picking it was the annoyance.
+  const storedTunnel = stored.tunnel !== null && typeof stored.tunnel === 'object' ? stored.tunnel : {}
+  const tunnelProvider =
+    typeof storedTunnel.provider === 'string' && TUNNEL_PROVIDERS.has(storedTunnel.provider.trim())
+      ? storedTunnel.provider.trim()
+      : undefined
+  const store = {
+    path,
+    dir,
+    port,
+    keys,
+    aliases: aliasTable,
+    tunnel: {
+      provider: tunnelProvider,
+      autostart: storedTunnel.autostart === true && tunnelProvider !== undefined,
+    },
+    persisted: false,
+  }
   saveStore(ctx, store)
   return store
 }
@@ -2407,6 +2470,14 @@ function saveStore(ctx, store) {
     // Only persisted when non-empty: an empty table would otherwise erase a
     // profile's YAML aliases on the next boot.
     if (Object.keys(store.aliases ?? {}).length > 0) body.aliases = store.aliases
+    // Written only once a provider has actually been chosen, so an untouched
+    // profile keeps deferring to the bundle config.
+    if (store.tunnel?.provider !== undefined) {
+      body.tunnel = {
+        provider: store.tunnel.provider,
+        ...(store.tunnel.autostart === true ? { autostart: true } : {}),
+      }
+    }
     writeFileSync(store.path, `${JSON.stringify(body, null, 2)}\n`, {
       mode: 0o600,
     })
@@ -2420,6 +2491,126 @@ function saveStore(ctx, store) {
     store.persisted = false
     logWarn(ctx, `could not persist settings at ${store.path}: ${messageOf(error)}`)
   }
+}
+
+/* ----------------------------------------------------------- usage store */
+
+/** A zeroed counter block, so a restored file and a fresh boot agree on shape. */
+function emptyUsageTotals() {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    totalTokens: 0,
+    reasoningTokens: 0,
+    cacheReadTokens: 0,
+    // Only requests that reported usage of their own are counted here, so this
+    // is the denominator for the token figures beside it.
+    calls: 0,
+  }
+}
+
+function usageFilePath(dir) {
+  return join(dir, USAGE_FILENAME)
+}
+
+/** Whether a restored row carries the field the log is ordered by. */
+function isUsableTrace(entry) {
+  return entry !== null && typeof entry === 'object' && Number.isFinite(Number(entry.at))
+}
+
+/** Drop rows outside the retention window. The counters are never touched. */
+function purgeUsage(recent) {
+  const cutoff = Date.now() - USAGE_RETENTION_DAYS * 24 * 60 * 60 * 1000
+  return recent.filter((entry) => Number(entry.at) >= cutoff)
+}
+
+/**
+ * Read the persisted counters and detail log.
+ *
+ * Unreadable parts are dropped instead of repaired: a corrupt row must not take
+ * the dashboard down, and a missing file is simply a first run. Rows past the
+ * retention window are pruned here too, so a profile that sits unused for a
+ * month is cleaned the moment it loads rather than on the next request.
+ */
+function loadUsage(dir) {
+  const blank = { totals: emptyUsageTotals(), recent: [], requests: 0, failures: 0 }
+  let parsed
+  try {
+    parsed = JSON.parse(readFileSync(usageFilePath(dir), 'utf8'))
+  } catch {
+    return blank
+  }
+  if (parsed === null || typeof parsed !== 'object') return blank
+
+  const totals = emptyUsageTotals()
+  const stored = parsed.totals
+  if (stored !== null && typeof stored === 'object') {
+    for (const key of Object.keys(totals)) {
+      const value = Number(stored[key])
+      if (Number.isFinite(value) && value >= 0) totals[key] = value
+    }
+  }
+  const counter = (value) => (Number.isFinite(Number(value)) ? Math.max(0, Number(value)) : 0)
+  return {
+    totals,
+    recent: purgeUsage(Array.isArray(parsed.recent) ? parsed.recent.filter(isUsableTrace) : []),
+    requests: counter(parsed.requests),
+    failures: counter(parsed.failures),
+  }
+}
+
+/**
+ * Write the counters and log out.
+ *
+ * This file is a record of observations, so it is written synchronously but
+ * only after traffic settles (see `scheduleUsageFlush`): losing the last few
+ * seconds on a hard kill costs nothing, while rewriting it per request would
+ * put disk IO on the answer path.
+ */
+function saveUsage(ctx, state) {
+  const path = usageFilePath(state.store.dir)
+  try {
+    mkdirSync(state.store.dir, { recursive: true })
+    state.recent = purgeUsage(state.recent)
+    const body = {
+      version: 1,
+      updatedAt: Date.now(),
+      totals: { ...state.usageTotals },
+      requests: state.requests,
+      failures: state.failures,
+      recent: state.recent,
+    }
+    writeFileSync(path, `${JSON.stringify(body)}\n`, { mode: 0o600 })
+    try {
+      chmodSync(path, 0o600)
+    } catch {
+      /* Windows ignores POSIX modes; the home directory ACL already applies */
+    }
+    state.usagePersisted = true
+  } catch (error) {
+    state.usagePersisted = false
+    logWarn(ctx, `could not persist usage at ${path}: ${messageOf(error)}`)
+  }
+}
+
+/** Flush after the traffic settles, so a burst of requests costs one write. */
+function scheduleUsageFlush(ctx, state) {
+  if (state.usageTimer !== undefined) return
+  state.usageTimer = setTimeout(() => {
+    state.usageTimer = undefined
+    saveUsage(ctx, state)
+  }, USAGE_FLUSH_MS)
+  // Never hold the process open just to write statistics.
+  state.usageTimer.unref?.()
+}
+
+/** Flush now, cancelling any pending timer. Used when the plugin unloads. */
+function flushUsage(ctx, state) {
+  if (state.usageTimer !== undefined) {
+    clearTimeout(state.usageTimer)
+    state.usageTimer = undefined
+  }
+  saveUsage(ctx, state)
 }
 
 /* -------------------------------------------------------------- listener */
@@ -2923,9 +3114,53 @@ async function applyTunnel(ctx, state, req, res, bodyLimit) {
     typeof body.provider === 'string' && TUNNEL_PROVIDERS.has(body.provider.trim())
       ? body.provider.trim()
       : undefined
-  if (requested !== undefined) state.tunnelConfig.provider = requested
+  if (requested !== undefined) {
+    state.tunnelConfig.provider = requested
+    // Remember the choice: the next restart comes up with this provider already
+    // selected instead of asking the user to pick again.
+    state.store.tunnel = { provider: requested, autostart: state.tunnelConfig.autostart === true }
+    saveStore(ctx, state.store)
+  }
   startTunnel(ctx, state, requested)
   sendJson(res, 200, tunnelPayload(state))
+}
+
+/**
+ * Clear the retained detail log.
+ *
+ * The all-time counters are deliberately kept: the page calls them "永远累计",
+ * and a user clearing rows because a test polluted them should not also lose
+ * the totals they were using to judge the gateway. `includeTotals` is the
+ * explicit way to start over completely.
+ */
+async function applyUsage(ctx, state, req, res, bodyLimit) {
+  let body
+  try {
+    body = await readBody(req, bodyLimit)
+  } catch (error) {
+    sendJson(res, 400, { error: messageOf(error) })
+    return
+  }
+  if (body.action !== 'clear') {
+    sendJson(res, 400, {
+      error: 'unknown-action',
+      message: 'expected {"action":"clear"}',
+    })
+    return
+  }
+  const cleared = state.recent.length
+  state.recent = []
+  if (body.includeTotals === true) {
+    state.usageTotals = emptyUsageTotals()
+    state.requests = 0
+    state.failures = 0
+  }
+  flushUsage(ctx, state)
+  sendJson(res, 200, {
+    cleared,
+    requests: state.requests,
+    usageTotals: { ...state.usageTotals },
+  })
 }
 
 /**
@@ -2988,13 +3223,26 @@ function refreshRequested(url) {
 }
 
 /**
+ * `?usagePage=N` selects which slice of the detail log the status document
+ * carries. Anything unparseable falls back to the first page rather than
+ * failing the read: a bad query string must not blank the whole dashboard.
+ */
+function usagePageRequested(url) {
+  const mark = typeof url === 'string' ? url.indexOf('?') : -1
+  if (mark < 0) return 1
+  const raw = new URLSearchParams(url.slice(mark + 1)).get('usagePage')
+  const page = Number(raw)
+  return Number.isInteger(page) && page >= 1 ? page : 1
+}
+
+/**
  * The page's single read. The catalog it carries is rebuilt first when the
  * snapshot is older than the TTL, or when the caller forced a pass: the page
  * renders exactly what this document says, so a snapshot that is never
  * rebuilt turns a late-binding adapter into a provider that is missing from
  * the UI until some unrelated OpenAI client happens to call `/v1/models`.
  */
-async function statusPayload(ctx, state, ttl, refresh) {
+async function statusPayload(ctx, state, ttl, refresh, usagePage = 1) {
   let entries
   try {
     entries = await catalog(ctx, state, ttl, refresh)
@@ -3006,6 +3254,7 @@ async function statusPayload(ctx, state, ttl, refresh) {
   for (const entry of entries) {
     counts.set(entry.provider, (counts.get(entry.provider) ?? 0) + 1)
   }
+  const pagedUsage = usagePayload(state, usagePage)
   return {
     id: PLUGIN_ID,
     enabled: state.enabled,
@@ -3045,17 +3294,36 @@ async function statusPayload(ctx, state, ttl, refresh) {
     })),
     requests: state.requests,
     failures: state.failures,
-    // Totals for this process only, accumulated in `recordRequest`. Not
-    // persisted: they reset with the gateway, and the page labels them with
-    // `startedAt` so "since 09:41" is read correctly.
+    // All-time counters. Restored from disk at boot and flushed after traffic
+    // settles, so these survive a restart and a plugin update instead of
+    // resetting to zero.
     usageTotals: { ...state.usageTotals },
+    // The retained log is paged server-side: thirty days of rows would be
+    // hundreds of kilobytes on every page load, and the table shows ten.
+    usage: pagedUsage,
+    // Kept for compatibility with a page that only reads `recent`; it is the
+    // same slice the pager above describes.
+    recent: pagedUsage.rows,
     bytes: { ...state.bytes },
-    // Newest first. This is what turns "it dropped again" into a cause: the
-    // model, how many attempts it took, how long the first byte took, and the
-    // adapter's own code when it ended badly.
-    recent: state.recent.map((entry) => ({ ...entry })),
     startedAt: state.startedAt,
     catalogAt: state.catalog.at,
+  }
+}
+
+/** One page of the detail log, plus the numbers the pager needs. */
+function usagePayload(state, page) {
+  const total = state.recent.length
+  const totalPages = Math.max(1, Math.ceil(total / USAGE_PAGE_SIZE))
+  const current = Math.min(Math.max(1, page), totalPages)
+  const start = (current - 1) * USAGE_PAGE_SIZE
+  return {
+    page: current,
+    pageSize: USAGE_PAGE_SIZE,
+    total,
+    totalPages,
+    retentionDays: USAGE_RETENTION_DAYS,
+    persisted: state.usagePersisted === true,
+    rows: state.recent.slice(start, start + USAGE_PAGE_SIZE).map((entry) => ({ ...entry })),
   }
 }
 

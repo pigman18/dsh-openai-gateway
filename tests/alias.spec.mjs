@@ -10,9 +10,10 @@
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { Readable } from 'node:stream'
 import { apply } from '../index.js'
 
 /* --------------------------------------------------------------- fake llm */
@@ -39,6 +40,9 @@ function fakeLlm() {
       async *stream() {
         calls.push(config.model)
         yield { type: 'text-delta', text: `echo:${config.model}` }
+        // Usage is a chunk of its own, which is where the gateway reads it
+        // from; an adapter that omits one leaves the persisted totals zero.
+        yield { type: 'usage', usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 40 } }
         yield { type: 'finish', reason: 'stop' }
       },
     }),
@@ -48,13 +52,25 @@ function fakeLlm() {
 /** A minimal cordis-shaped context, enough for `apply`. */
 function fakeCtx(llm) {
   const disposers = []
+  // Control routes are mounted on the harness web server, so a test that drives
+  // them (clear-log, tunnel) needs the same register seam the page goes through.
+  const webRoutes = new Map()
   return {
     llm,
+    webRoutes,
     logger: { info() {}, warn() {} },
     effect: (factory) => {
       disposers.push(factory())
     },
-    get: () => undefined,
+    get: (key) =>
+      key === 'webServer' || key === 'httpServer'
+        ? {
+            register: (route) => {
+              webRoutes.set(route.path, route.handler)
+              return () => {}
+            },
+          }
+        : undefined,
     on: () => {},
     disposeAll: () => {
       for (const dispose of disposers) {
@@ -479,6 +495,199 @@ await check('an unknown tunnel provider is refused, not spawned', async () => {
     assert.equal(state.tunnel.status, 'idle')
   } finally {
     ctx.disposeAll()
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+/* ------------------------------------------------------------ usage store */
+
+/** One chat completion against the gateway's own listener. */
+function postCompletion(state, model = 'flash') {
+  return request(state.listenPort, {
+    method: 'POST',
+    path: '/v1/chat/completions',
+    auth: state.apiKey,
+    body: { model, messages: [{ role: 'user', content: 'hi' }] },
+  })
+}
+
+/**
+ * One control-route write. The control routes are mounted on the harness web
+ * server, so the fake context records their handlers and this drives them with
+ * a real readable request, exactly as the page's fetch would.
+ */
+function postControl(ctx, path, body) {
+  const handler = ctx.webRoutes.get(path)
+  if (handler === undefined) throw new Error(`control route never mounted: ${path}`)
+  const payload = JSON.stringify(body)
+  const req = Readable.from([Buffer.from(payload)])
+  req.method = 'POST'
+  req.url = path
+  req.headers = {
+    'content-type': 'application/json',
+    'content-length': String(Buffer.byteLength(payload)),
+    origin: 'http://127.0.0.1',
+    host: '127.0.0.1',
+  }
+  return new Promise((resolve, reject) => {
+    const res = {
+      statusCode: 0,
+      headersSent: false,
+      writeHead(status) {
+        this.statusCode = status
+        this.headersSent = true
+        return this
+      },
+      setHeader() {},
+      getHeader() {},
+      write() {},
+      on() {},
+      end(text) {
+        resolve({ status: this.statusCode, body: String(text ?? '') })
+      },
+      destroy() {
+        reject(new Error('response destroyed before it ended'))
+      },
+    }
+    Promise.resolve(handler(req, res)).catch(reject)
+  })
+}
+
+await check('the counters survive a restart instead of zeroing', async () => {
+  /* The reported complaint: updating or restarting the plugin reset "累计调用"
+     to zero. The counters now live in usage.json and are restored on load. */
+  const home = mkdtempSync(join(tmpdir(), 'dsh-gw-usage-'))
+  process.env.DSH_HOME = home
+  const port = await freePort()
+  try {
+    const ctx1 = fakeCtx(fakeLlm())
+    const first = apply(ctx1, { port, aliases: { flash: ['provider-a/only-a'] } })
+    await waitForPort(first)
+    await postCompletion(first, 'flash')
+    // The flush is debounced; dispose runs it synchronously.
+    ctx1.disposeAll()
+
+    const usagePath = join(home, 'openai-gateway', 'usage.json')
+    const persisted = JSON.parse(readFileSync(usagePath, 'utf8'))
+    assert.equal(persisted.requests, 1, 'the request counter was not written')
+    assert.equal(persisted.totals.calls, 1, 'the usage totals were not written')
+    assert.equal(persisted.recent.length, 1, 'the detail row was not written')
+
+    const ctx2 = fakeCtx(fakeLlm())
+    const second = apply(ctx2, { port, aliases: { flash: ['provider-a/only-a'] } })
+    await waitForPort(second)
+    try {
+      assert.equal(second.requests, 1, 'the counter did not survive the restart')
+      assert.equal(second.usageTotals.calls, 1, 'the totals did not survive the restart')
+      assert.equal(second.recent.length, 1, 'the detail log did not survive the restart')
+    } finally {
+      ctx2.disposeAll()
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await check('rows outside the retention window are dropped, totals are not', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-gw-usage-age-'))
+  process.env.DSH_HOME = home
+  const port = await freePort()
+  try {
+    const dir = join(home, 'openai-gateway')
+    mkdirSync(dir, { recursive: true })
+    const now = Date.now()
+    const stale = now - 31 * 24 * 60 * 60 * 1000
+    writeFileSync(
+      join(dir, 'usage.json'),
+      JSON.stringify({
+        version: 1,
+        totals: { inputTokens: 500, outputTokens: 50, totalTokens: 550, calls: 9 },
+        requests: 12,
+        failures: 3,
+        recent: [
+          { at: now - 1000, model: 'fresh', outcome: 'ok' },
+          { at: stale, model: 'expired', outcome: 'ok' },
+        ],
+      }),
+    )
+
+    const ctx = fakeCtx(fakeLlm())
+    const state = apply(ctx, { port })
+    await waitForPort(state)
+    try {
+      assert.equal(state.recent.length, 1, 'the expired row survived the retention window')
+      assert.equal(state.recent[0].model, 'fresh')
+      assert.equal(state.requests, 12, 'the counter must not age out with the rows')
+      assert.equal(state.usageTotals.calls, 9, 'the totals must not age out with the rows')
+    } finally {
+      ctx.disposeAll()
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await check('clearing the log keeps the all-time counters', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'dsh-gw-usage-clear-'))
+  process.env.DSH_HOME = home
+  const port = await freePort()
+  try {
+    const ctx = fakeCtx(fakeLlm())
+    const state = apply(ctx, { port, aliases: { flash: ['provider-a/only-a'] } })
+    await waitForPort(state)
+    try {
+      await postCompletion(state, 'flash')
+      assert.equal(state.recent.length, 1)
+
+      const cleared = await postControl(ctx, '/plugins/dsh-openai-gateway/usage', { action: 'clear' })
+      assert.equal(cleared.status, 200, `clear failed: ${cleared.body}`)
+      assert.equal(JSON.parse(cleared.body).cleared, 1, 'the response did not report the count')
+      assert.equal(state.recent.length, 0, 'the rows were not cleared')
+      assert.equal(state.requests, 1, 'clearing the log must keep the cumulative counter')
+      assert.equal(state.usageTotals.calls, 1, 'clearing the log must keep the token totals')
+    } finally {
+      ctx.disposeAll()
+    }
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+await check('the tunnel provider is remembered across a restart', async () => {
+  /* The reported annoyance: ngrok had to be re-picked after every restart
+     because the choice was only ever held in memory. */
+  const home = mkdtempSync(join(tmpdir(), 'dsh-gw-tunnel-remember-'))
+  process.env.DSH_HOME = home
+  const port = await freePort()
+  try {
+    const ctx1 = fakeCtx(fakeLlm())
+    const first = apply(ctx1, { port })
+    await waitForPort(first)
+    // A stand-in tunnel process: this check is about what gets written to
+    // settings.json, not about ngrok. Spawning the real binary would hang the
+    // suite on a machine that does not have it installed.
+    first.tunnelCommand = { command: process.execPath, prefixArgs: ['-e', ''] }
+    // Selecting a provider is a control-route write, same as the page's click.
+    await postControl(ctx1, '/plugins/dsh-openai-gateway/tunnel', { action: 'start', provider: 'ngrok' })
+    ctx1.disposeAll()
+
+    const settings = JSON.parse(readFileSync(join(home, 'openai-gateway', 'settings.json'), 'utf8'))
+    assert.equal(settings.tunnel?.provider, 'ngrok', 'the provider was not written to settings.json')
+
+    const ctx2 = fakeCtx(fakeLlm())
+    const second = apply(ctx2, { port })
+    await waitForPort(second)
+    try {
+      assert.equal(
+        second.tunnelConfig.provider,
+        'ngrok',
+        'the remembered provider did not come back on the next boot',
+      )
+      assert.equal(second.tunnel.provider, 'ngrok', 'the page would show no provider selected')
+    } finally {
+      ctx2.disposeAll()
+    }
+  } finally {
     rmSync(home, { recursive: true, force: true })
   }
 })

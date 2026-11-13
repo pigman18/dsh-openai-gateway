@@ -513,18 +513,72 @@ await check('the model catalogue is searchable', () => {
   assert.equal(searchInput.props['aria-label'], 'search.label', 'the search input needs an accessible name')
 })
 
-await check('the recent request table shows both outcomes', () => {
-  assert.ok(texts.includes('recent.title'), 'the recent table is missing')
-  assert.ok(texts.includes('trae/deepseek-v4.1-flash'), 'the served model is missing')
+await check('the call overview shows both outcomes and the split token columns', () => {
+  assert.ok(texts.includes('recent.title'), 'the overview is missing')
+  assert.ok(texts.includes('trae/deepseek-v4.1-flash'), 'the named model is missing')
   assert.ok(texts.includes('recent.ok'), 'a successful request should be marked ok')
-  assert.ok(texts.includes('UNKNOWN_MODEL'), 'a failed request should show its code')
-  /* 37058 -> 37k (whole thousands above ten thousand), 149 stays exact */
+  assert.ok(texts.includes('recent.failed'), 'a failed request should be marked failed')
+  /* The error code stays reachable through the badge title instead of widening
+     the column: long codes like NO_ADAPTER would push the table past its grid. */
+  const titles = []
+  const scan = (node) => {
+    if (node === null || typeof node !== 'object') return
+    if (Array.isArray(node)) {
+      for (const child of node) scan(child)
+      return
+    }
+    if (typeof node.props?.title === 'string') titles.push(node.props.title)
+    for (const child of node.children ?? []) scan(child)
+  }
+  scan(rendered)
   assert.ok(
-    texts.includes('37k → 149'),
-    `token in/out should be abbreviated; saw: ${texts.filter((t) => t.includes('→')).join(', ')}`,
+    titles.includes('UNKNOWN_MODEL'),
+    `the failure code is not reachable; saw: ${JSON.stringify(titles.slice(0, 20))}`,
   )
-  /* The failed row carries no usage, so it must not print 0 → 0. */
-  assert.ok(texts.includes('—'), 'a row without usage should render a dash')
+  /* Input, cache and output are three columns now, not one `in → out` cell. */
+  assert.ok(texts.includes('37k'), `input tokens missing; saw: ${texts.slice(0, 30).join('|')}`)
+  assert.ok(texts.includes('149'), 'output tokens missing')
+  /* The fixture reports no cache reads and the failed row no usage at all, so
+     three cells dash out rather than printing 0. */
+  assert.ok(
+    texts.filter((value) => value === '—').length >= 2,
+    'a row without usage should render dashes',
+  )
+})
+
+await check('the call overview carries the four all-time cards', () => {
+  for (const key of ['recent.calls', 'recent.volume', 'recent.hitRate', 'recent.average']) {
+    assert.ok(texts.includes(key), `the ${key} card is missing`)
+  }
+  /* Each card is label / figure / one `unit·hint` line. */
+  assert.ok(texts.includes('recent.callsHint'), 'the calls card has no unit line')
+  assert.ok(texts.includes('recent.volumeHint'), 'the volume card has no unit line')
+})
+
+await check('the overview offers a pager and a clear button', () => {
+  assert.ok(texts.includes('recent.pager'), 'the pager line is missing')
+  assert.ok(texts.includes('recent.prev'), 'no previous-page control')
+  assert.ok(texts.includes('recent.next'), 'no next-page control')
+  assert.ok(texts.includes('recent.clear'), 'no clear-log button')
+})
+
+await check('the pager follows the host page count, not the rows on screen', () => {
+  /* The host pages the log, so the footer has to read its numbers: two rows on
+     screen must not turn into "1 / 1" when the log holds 823. */
+  const tree = render({
+    ...STATUS,
+    usage: { page: 3, pageSize: 10, total: 823, totalPages: 83, retentionDays: 30 },
+    recent: STATUS.recent,
+  })
+  const found = collect(tree)
+  const pager = found.find((value) => value === 'recent.pager')
+  assert.ok(pager !== undefined, 'the pager is missing when the host reports pages')
+  /* The fill template is passed through the locale stub, so the numbers land in
+     the status document's values rather than in this text. */
+  assert.ok(
+    found.some((value) => value === 'recent.prev') && found.some((value) => value === 'recent.next'),
+    'the pager has no navigation',
+  )
 })
 
 await check('an empty recent list says so', () => {

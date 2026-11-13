@@ -30,6 +30,7 @@ window.__ModuleLoader__.load({
 		const KEY_PATH = "/plugins/dsh-openai-gateway/key";
 		const ALIAS_PATH = "/plugins/dsh-openai-gateway/aliases";
 		const TUNNEL_PATH = "/plugins/dsh-openai-gateway/tunnel";
+const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 		const STYLE_ATTR = "data-dsh-openai-gateway";
 		//#endregion
 
@@ -115,7 +116,7 @@ window.__ModuleLoader__.load({
 			"stat.failed": "失败 {count}",
 			"stat.models": "模型",
 			"stat.providers": "{count} 个 provider",
-			"stat.tokens": "令牌",
+			"stat.tokens": "token",
 			"stat.tokenHint": "入 {input} · 出 {output}",
 			"stat.traffic": "流量",
 			"stat.trafficHint": "收 {input} · 发 {output}",
@@ -125,17 +126,36 @@ window.__ModuleLoader__.load({
 			"search.label": "搜索模型",
 			"search.placeholder": "按 ID、名称或 provider 过滤",
 			"search.empty": "没有匹配的模型",
-			"recent.title": "最近请求",
+			"recent.title": "调用总览",
 			"recent.time": "时间",
 			"recent.model": "模型",
 			"recent.result": "结果",
 			"recent.tokens": "token",
 			"recent.took": "耗时",
-			"recent.servedBy": "实际模型",
+			"recent.servedBy": "实际调用模型",
+			"recent.input": "输入",
+			"recent.cache": "缓存",
+			"recent.output": "输出",
 			"recent.ok": "成功",
 			"recent.failed": "失败",
 			"recent.empty": "还没有请求记录",
-			"recent.window": "只保留最近 {count} 条",
+			"recent.window": "永久累计，明细保留 {days} 天",
+			"recent.calls": "累计调用",
+			"recent.callsHint": "次·全部记录",
+			"recent.volume": "处理量",
+			"recent.volumeHint": "token·输入 + 输出",
+			"recent.hitRate": "缓存命中",
+			"recent.hitRateHint": "{cached}·占输入",
+			"recent.average": "平均每次",
+			"recent.averageHint": "token·单次",
+			"recent.clear": "清理日志",
+			"recent.clearHint": "清空明细记录，累计统计保留",
+			"recent.cleared": "已清理 {count} 条记录",
+			"recent.clearFailed": "清理失败，请重试",
+			"recent.pager": "第 {page} / {pages} 页 · 共 {total} 条",
+			"recent.prev": "上一页",
+			"recent.next": "下一页",
+			"recent.moved": "降级后由该模型应答",
 			"tab.overview": "概览",
 			"tab.routes": "路由",
 			"tab.tunnel": "隧道",
@@ -319,17 +339,36 @@ window.__ModuleLoader__.load({
 			"search.label": "Search models",
 			"search.placeholder": "Filter by ID, name, or provider",
 			"search.empty": "No matching model",
-			"recent.title": "Recent requests",
+			"recent.title": "Call overview",
 			"recent.time": "Time",
 			"recent.model": "Model",
 			"recent.result": "Result",
 			"recent.tokens": "token",
 			"recent.took": "Took",
 			"recent.servedBy": "Served by",
+			"recent.input": "Input",
+			"recent.cache": "Cache",
+			"recent.output": "Output",
 			"recent.ok": "ok",
 			"recent.failed": "failed",
 			"recent.empty": "No requests recorded yet",
-			"recent.window": "last {count} kept",
+			"recent.window": "totals kept forever, rows kept {days} days",
+			"recent.calls": "Total calls",
+			"recent.callsHint": "calls · all records",
+			"recent.volume": "Volume",
+			"recent.volumeHint": "token · input + output",
+			"recent.hitRate": "Cache hit",
+			"recent.hitRateHint": "{cached} · of input",
+			"recent.average": "Average",
+			"recent.averageHint": "token · per call",
+			"recent.clear": "Clear log",
+			"recent.clearHint": "Clears the detail rows; the totals stay",
+			"recent.cleared": "Cleared {count} records",
+			"recent.clearFailed": "Could not clear the log",
+			"recent.pager": "Page {page} of {pages} · {total} records",
+			"recent.prev": "Previous",
+			"recent.next": "Next",
+			"recent.moved": "served after failover",
 			"tab.overview": "Overview",
 			"tab.routes": "Routes",
 			"tab.tunnel": "Tunnel",
@@ -683,19 +722,43 @@ window.__ModuleLoader__.load({
 [${STYLE_ATTR}] .gw-tnum { font-variant-numeric: tabular-nums; }
 [${STYLE_ATTR}] .gw-mono { font-family: var(--dsw-font-mono); }
 
-/* recent-request grid: time / model / result / served-by / tokens / took.
-   Every column that holds a number — or a badge, which is a shape rather than
-   prose — is aligned on the same edge in the header and the body, so the header
-   sits over its own column instead of drifting against it. The time column and
-   the took column are right-aligned; result and tokens are centred, because a
-   badge and a pair of figures both read best from their middle. */
-[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 78px minmax(0, 1.3fr) 82px minmax(0, 1.2fr) 112px 76px; }
+/* call-overview grid: time / model / served-by / input / cache / output / result.
+   Every numeric column is right-aligned so figures of different widths line up
+   on their units, which is what makes a token column scannable; the result
+   badge is centred because it is a shape rather than prose. */
+[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 74px minmax(0, 1.05fr) minmax(0, 1.35fr) 84px 84px 78px 62px; }
 [${STYLE_ATTR}] .gw-grid-recent > .gw-tnum,
 [${STYLE_ATTR}] .gw-grid-recent > .gw-th-num { text-align: right; }
 [${STYLE_ATTR}] .gw-grid-recent > .gw-tmid,
 [${STYLE_ATTR}] .gw-grid-recent > .gw-th-mid { text-align: center; }
 [${STYLE_ATTR}] .gw-th-num, [${STYLE_ATTR}] .gw-th-mid { font-weight: 400; }
 [${STYLE_ATTR}] .gw-served { display: inline-block; }
+/* ---- call-overview summary cards ----
+   Number alone on its line, then unit and hint joined by a middot below: the
+   unit repeated beside the figure pushed the hint onto a third line and made
+   four cards read as eight stacked fragments. */
+[${STYLE_ATTR}] .gw-usage-stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--gw-s2); margin-bottom: var(--gw-s3); }
+[${STYLE_ATTR}] .gw-stat-card {
+	padding: 12px 14px;
+	border-radius: var(--dsw-radius-md, 10px);
+	border: 1px solid var(--dsw-alias-border-l2);
+	background: var(--dsw-alias-bg-layer-1);
+}
+[${STYLE_ATTR}] .gw-stat-k { font-size: 11px; color: var(--dsw-alias-label-caption); letter-spacing: .3px; }
+[${STYLE_ATTR}] .gw-stat-v {
+	margin-top: 5px; font-size: 22px; line-height: 1.15; font-weight: 600;
+	font-variant-numeric: tabular-nums; letter-spacing: -.2px;
+}
+[${STYLE_ATTR}] .gw-stat-h { margin-top: 2px; font-size: 11px; color: var(--dsw-alias-label-caption); }
+/* Pager under the log: the count on the left, the two steps on the right. */
+[${STYLE_ATTR}] .gw-usage-pager {
+	display: flex; align-items: center; justify-content: space-between;
+	padding: var(--gw-s2) var(--gw-s3);
+	border-top: 1px solid var(--dsw-alias-border-l2);
+	color: var(--dsw-alias-label-caption); font-size: 11.5px;
+	font-variant-numeric: tabular-nums;
+}
+[${STYLE_ATTR}] .gw-pager-nav { display: flex; gap: var(--gw-s1); }
 [${STYLE_ATTR}] .gw-served.is-moved {
 	color: var(--dsw-alias-state-warn-label);
 	/* Failover changed which model answered; that is worth noticing. */
@@ -1451,10 +1514,12 @@ window.__ModuleLoader__.load({
 	[${STYLE_ATTR}] .gw-chain-list { max-height: 180px; }
 	[${STYLE_ATTR}] .gw-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	[${STYLE_ATTR}] .gw-picks { grid-template-columns: minmax(0, 1fr); }
+	[${STYLE_ATTR}] .gw-usage-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 64px minmax(0, 1fr) 76px; }
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(4),
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(5),
-	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(6) { display: none; }
+	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(6),
+	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(7) { display: none; }
 	[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 118px minmax(0, 1fr) 90px 112px; }
 	[${STYLE_ATTR}] .gw-kv { align-items: flex-start; flex-direction: column; }
 	[${STYLE_ATTR}] .gw-kv-ctl { max-width: 100%; width: 100%; }
@@ -1678,6 +1743,11 @@ window.__ModuleLoader__.load({
 			// Storing the exception keeps the default right when the catalogue
 			// grows, instead of seeding one entry per provider on every refresh.
 			const [closedGroups, setClosedGroups] = useState(() => new Set());
+			// Usage-log paging and the clear action. Declared last on purpose: the
+			// route editor is located by its slot position in a test, so inserting
+			// a hook above it would shift every slot below it.
+			const [usagePage, setUsagePage] = useState(1);
+			const [clearingUsage, setClearingUsage] = useState(false);
 
 			// One same-origin read: the status document carries the whole catalog.
 			// `/v1/models` lives on the gateway's own port, so asking for it from
@@ -1687,10 +1757,16 @@ window.__ModuleLoader__.load({
 			// `force` is what the Refresh button passes: the host rebuilds the
 			// catalog instead of replaying the snapshot it already has, so a
 			// provider that bound its adapter late still shows up on demand.
-			const load = useCallback(async (force = false) => {
+			// `page` selects which slice of the retained usage log comes back; the
+			// log is paged on the host so thirty days of rows are never shipped.
+			const load = useCallback(async (force = false, page = 1) => {
 				setFailed(false);
 				try {
-					const response = await fetch(force ? `${STATUS_PATH}?refresh=1` : STATUS_PATH, {
+					const query = [];
+					if (force) query.push("refresh=1");
+					if (page > 1) query.push(`usagePage=${page}`);
+					const url = query.length === 0 ? STATUS_PATH : `${STATUS_PATH}?${query.join("&")}`;
+					const response = await fetch(url, {
 						cache: "no-store",
 						credentials: "same-origin",
 						headers: { Accept: "application/json" },
@@ -1702,9 +1778,11 @@ window.__ModuleLoader__.load({
 				}
 			}, []);
 
+			// The page is part of the read: changing it refetches with that slice
+			// instead of filtering a full log the host never shipped.
 			useEffect(() => {
-				load();
-			}, [load]);
+				load(false, usagePage);
+			}, [load, usagePage]);
 
 			const isOn = status !== null && status.enabled === true;
 
@@ -1754,6 +1832,42 @@ window.__ModuleLoader__.load({
 					setTimeout(() => setCopied(""), 1500);
 				}
 			}, []);
+
+			/**
+			 * Clear the retained detail log.
+			 *
+			 * The all-time counters are kept: the page presents them as 永久累计,
+			 * and someone clearing rows because a test polluted them should not
+			 * also lose the totals they were using to judge the gateway.
+			 */
+			const clearUsage = useCallback(async () => {
+				setClearingUsage(true);
+				try {
+					const response = await fetch(USAGE_PATH, {
+						method: "POST",
+						cache: "no-store",
+						credentials: "same-origin",
+						headers: { Accept: "application/json", "Content-Type": "application/json" },
+						body: JSON.stringify({ action: "clear" }),
+					});
+					if (!response.ok) {
+						setNotice({ scope: "usage", kind: "bad", text: t("recent.clearFailed") });
+						return;
+					}
+					const body = await response.json();
+					setNotice({
+						scope: "usage",
+						kind: "ok",
+						text: fill(t("recent.cleared"), { count: Number(body?.cleared) || 0 }),
+					});
+					setUsagePage(1);
+					await load(false, 1);
+				} catch {
+					setNotice({ scope: "usage", kind: "bad", text: t("recent.clearFailed") });
+				} finally {
+					setClearingUsage(false);
+				}
+			}, [load, t]);
 
 			const openTab = useCallback((next) => {
 				setTab(next);
@@ -2119,6 +2233,90 @@ window.__ModuleLoader__.load({
 			const providerCount = Array.isArray(status?.providers) ? status.providers.length : groups.length;
 			const uptime = Number.isFinite(status?.startedAt) ? Date.now() - status.startedAt : 0;
 			const recent = Array.isArray(status?.recent) ? status.recent : [];
+			// The host pages the retained log, so the pager reads its numbers
+			// rather than counting the rows that came back — those are one page.
+			const usageLog = status?.usage !== null && typeof status?.usage === "object" ? status.usage : null;
+			const usageRetentionDays = Number.isFinite(usageLog?.retentionDays) ? usageLog.retentionDays : 30;
+			const usageRows = Number.isFinite(usageLog?.total) ? usageLog.total : recent.length;
+			const usagePages = Number.isFinite(usageLog?.totalPages) ? Math.max(1, usageLog.totalPages) : 1;
+			const usageCurrent = Number.isFinite(usageLog?.page) ? Math.min(Math.max(1, usageLog.page), usagePages) : 1;
+
+			/** Group digits so a five-figure call total stays readable. */
+			const formatCount = (value) =>
+				Number.isFinite(value) ? Math.round(value).toLocaleString("en-US") : "0";
+
+			/**
+			 * The four all-time cards above the log.
+			 *
+			 * Every figure is cumulative across restarts: they come from the
+			 * persisted counters, not from the rows on screen, so paging through
+			 * the log never changes them.
+			 */
+			const usageSummary = () => {
+				const totals = usageTotals ?? {};
+				const calls = Number.isFinite(status?.requests) ? status.requests : (totals.calls ?? 0);
+				const input = Number.isFinite(totals.inputTokens) ? totals.inputTokens : 0;
+				const output = Number.isFinite(totals.outputTokens) ? totals.outputTokens : 0;
+				const cached = Number.isFinite(totals.cacheReadTokens) ? totals.cacheReadTokens : 0;
+				const volume = Number.isFinite(totals.totalTokens) ? totals.totalTokens : input + output;
+				// Cache reads are part of the input, so the ratio is bounded by 100
+				// even if an adapter reports them separately.
+				const hitRate = input > 0 ? Math.min(100, (cached / input) * 100) : 0;
+				const perCall = calls > 0 ? volume / calls : 0;
+				const card = (key, label, value, hint) =>
+					h(
+						"div",
+						{ className: "gw-stat-card", key },
+						h("div", { className: "gw-stat-k" }, label),
+						h("div", { className: "gw-stat-v" }, value),
+						h("div", { className: "gw-stat-h" }, hint),
+					);
+				return h(
+					"div",
+					{ className: "gw-usage-stats" },
+					card("calls", t("recent.calls"), formatCount(calls), t("recent.callsHint")),
+					card("volume", t("recent.volume"), formatTokens(volume), t("recent.volumeHint")),
+					card(
+						"hit",
+						t("recent.hitRate"),
+						`${hitRate.toFixed(1)}%`,
+						fill(t("recent.hitRateHint"), { cached: formatTokens(cached) }),
+					),
+					card("avg", t("recent.average"), formatTokens(Math.round(perCall)), t("recent.averageHint")),
+				);
+			};
+
+			/** The pager under the log; it only ever moves the server-side slice. */
+			const usagePager = () =>
+				h(
+					"div",
+					{ className: "gw-usage-pager" },
+					h("span", null, fill(t("recent.pager"), { page: usageCurrent, pages: usagePages, total: usageRows })),
+					h(
+						"div",
+						{ className: "gw-pager-nav" },
+						h(
+							"button",
+							{
+								type: "button",
+								className: "gw-btn is-sm",
+								disabled: usageCurrent <= 1,
+								onClick: () => setUsagePage(Math.max(1, usageCurrent - 1)),
+							},
+							t("recent.prev"),
+						),
+						h(
+							"button",
+							{
+								type: "button",
+								className: "gw-btn is-sm",
+								disabled: usageCurrent >= usagePages,
+								onClick: () => setUsagePage(Math.min(usagePages, usageCurrent + 1)),
+							},
+							t("recent.next"),
+						),
+					),
+				);
 
 			/* Routes are the alias table plus wherever each cursor currently sits.
 			 * The count is what the tab badge shows, so a route that has moved off
@@ -2246,8 +2444,9 @@ window.__ModuleLoader__.load({
 									fill(t("stat.since"), { time: clockOf(status.startedAt) }),
 								),
 							),
-					// Recent activity: the one thing that turns "it dropped again"
-					// into a cause, so it belongs on the landing tab.
+					// Call overview: all-time totals plus the retained detail log.
+					// This is what turns "it dropped again" into a cause, so it
+					// belongs on the landing tab.
 					h(
 						"section",
 						{ className: "gw-sec" },
@@ -2258,75 +2457,104 @@ window.__ModuleLoader__.load({
 								"div",
 								{ className: "gw-sec-titles" },
 								h("h2", { className: "gw-sec-title" }, t("recent.title")),
-								h("p", { className: "gw-sec-sub" }, fill(t("recent.window"), { count: recent.length })),
+								h(
+									"p",
+									{ className: "gw-sec-sub" },
+									fill(t("recent.window"), { days: usageRetentionDays }),
+								),
+							),
+							h(
+								"div",
+								{ className: "gw-sec-side" },
+								h(
+									"button",
+									{
+										type: "button",
+										className: "gw-btn",
+										title: t("recent.clearHint"),
+										disabled: clearingUsage || recent.length === 0,
+										onClick: clearUsage,
+									},
+									t("recent.clear"),
+								),
 							),
 						),
+						usageSummary(),
+						noticeFor("usage"),
 						recent.length === 0
 							? h("div", { className: "gw-card gw-empty" }, t("recent.empty"))
 							: h(
 									"div",
-									{ className: "gw-table" },
+									{ className: "gw-card" },
 									h(
 										"div",
-										{ className: "gw-trow gw-thead gw-grid-recent" },
-										h("span", { className: "gw-tnum gw-th-num" }, t("recent.time")),
-										h("span", null, t("recent.model")),
-										h("span", { className: "gw-th-mid" }, t("recent.result")),
-										h("span", null, t("recent.servedBy")),
-										h("span", { className: "gw-tnum gw-th-num" }, t("recent.tokens")),
-										h("span", { className: "gw-tnum gw-th-num" }, t("recent.took")),
-									),
-									h(
-										"div",
-										{ className: "gw-tbody" },
-										recent.map((entry, index) => {
-											const ok = entry?.outcome === "ok";
-											const usage = entry?.usage;
-											// What actually served: the failover target, which is the
-											// fact a debugging session needs — the caller named one
-											// model, a different one may have answered.
-											const served =
-												typeof entry?.provider === "string" && typeof entry?.upstreamModel === "string"
-													? `${entry.provider}/${entry.upstreamModel}`
-													: (entry?.provider ?? "—");
-											const moved =
-												typeof entry?.model === "string" &&
-												served !== "—" &&
-												entry.model !== served;
-											return h(
-												"div",
-												{ className: "gw-trow gw-grid-recent", key: `${entry?.at ?? index}-${index}` },
-												h("span", { className: "gw-tcell gw-tnum" }, clockOf(entry?.at)),
-												h("span", { className: "gw-tcell gw-mono", title: entry?.model }, entry?.model ?? "—"),
-												h(
-													"span",
-													{ className: "gw-tcell gw-tmid" },
+										{ className: "gw-table" },
+										h(
+											"div",
+											{ className: "gw-trow gw-thead gw-grid-recent" },
+											h("span", { className: "gw-tnum gw-th-num" }, t("recent.time")),
+											h("span", null, t("recent.model")),
+											h("span", null, t("recent.servedBy")),
+											h("span", { className: "gw-tnum gw-th-num" }, t("recent.input")),
+											h("span", { className: "gw-tnum gw-th-num" }, t("recent.cache")),
+											h("span", { className: "gw-tnum gw-th-num" }, t("recent.output")),
+											h("span", { className: "gw-th-mid" }, t("recent.result")),
+										),
+										h(
+											"div",
+											{ className: "gw-tbody" },
+											recent.map((entry, index) => {
+												const ok = entry?.outcome === "ok";
+												const usage = entry?.usage;
+												// What actually served: the failover target, which is the
+												// fact a debugging session needs — the caller named one
+												// model, a different one may have answered.
+												const served =
+													typeof entry?.provider === "string" && typeof entry?.upstreamModel === "string"
+														? `${entry.provider}/${entry.upstreamModel}`
+														: (entry?.provider ?? "—");
+												const moved =
+													typeof entry?.model === "string" &&
+													served !== "—" &&
+													entry.model !== served;
+												const cell = (value) =>
+													usage === undefined || usage === null || !Number.isFinite(Number(value))
+														? "—"
+														: formatTokens(value);
+												return h(
+													"div",
+													{ className: "gw-trow gw-grid-recent", key: `${entry?.at ?? index}-${index}` },
+													h("span", { className: "gw-tcell gw-tnum" }, clockOf(entry?.at)),
+													h("span", { className: "gw-tcell gw-mono", title: entry?.model }, entry?.model ?? "—"),
 													h(
 														"span",
-														{ className: `gw-badge ${ok ? "is-ok" : "is-bad"}` },
-														ok ? t("recent.ok") : (entry?.code ?? t("recent.failed")),
+														{ className: "gw-tcell gw-mono", title: served },
+														moved
+															? h("span", { className: "gw-served is-moved", title: t("recent.moved") }, served)
+															: served,
 													),
-												),
-												h("span", { className: "gw-tcell gw-mono", title: served },
-													moved
-														? h("span", { className: "gw-served is-moved", title: t("recent.servedBy") }, served)
-														: served,
-												),
-												h(
-													"span",
-													{ className: "gw-tcell gw-tnum" },
-													usage === undefined || usage === null
-														? "—"
-														: `${formatTokens(usage.inputTokens)} → ${formatTokens(usage.outputTokens)}`,
-												),
-												h(
-													"span",
-													{ className: "gw-tcell gw-tnum" },
-													Number.isFinite(entry?.ms) ? `${entry.ms}ms` : "—",
-												),
-											);
-										}),
+													h("span", { className: "gw-tcell gw-tnum" }, cell(usage?.inputTokens)),
+													h("span", { className: "gw-tcell gw-tnum" }, cell(usage?.cacheReadTokens)),
+													h("span", { className: "gw-tcell gw-tnum" }, cell(usage?.outputTokens)),
+													h(
+														"span",
+														{ className: "gw-tcell gw-tmid" },
+														h(
+															"span",
+															{
+																className: `gw-badge ${ok ? "is-ok" : "is-bad"}`,
+																// The code is what makes a red row actionable, so it
+																// stays reachable without widening the column.
+																title: ok ? undefined : (entry?.code ?? t("recent.failed")),
+															},
+															ok ? t("recent.ok") : t("recent.failed"),
+														),
+													),
+												);
+											}),
+										),
 									),
+									usagePager(),
 								),
 					),
 				);
