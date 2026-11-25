@@ -114,6 +114,18 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"panel.empty": "暂无模型",
 			"stat.requests": "请求",
 			"stat.failed": "失败 {count}",
+			"stat.failedRate": "{count} 失败 · {rate}%",
+			"stat.callsUnit": "次",
+			"stat.window": "近 {minutes} 分钟",
+			"stat.seriesEmpty": "暂无近期记录",
+			"stat.barTitle": "{time} · 成功 {ok} / 失败 {failed}",
+			"stat.input": "输入",
+			"stat.cache": "缓存",
+			"stat.output": "输出",
+			"stat.perCall": "{value}/次",
+			"stat.received": "接收",
+			"stat.sent": "发送",
+			"stat.perRequest": "每次平均",
 			"stat.models": "模型",
 			"stat.providers": "{count} 个 provider",
 			"stat.tokens": "token",
@@ -327,6 +339,18 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"panel.empty": "No models",
 			"stat.requests": "Requests",
 			"stat.failed": "{count} failed",
+			"stat.failedRate": "{count} failed · {rate}%",
+			"stat.callsUnit": "calls",
+			"stat.window": "last {minutes} min",
+			"stat.seriesEmpty": "No recent traffic",
+			"stat.barTitle": "{time} · {ok} ok / {failed} failed",
+			"stat.input": "Input",
+			"stat.cache": "Cache",
+			"stat.output": "Output",
+			"stat.perCall": "{value}/call",
+			"stat.received": "Received",
+			"stat.sent": "Sent",
+			"stat.perRequest": "Per request",
 			"stat.models": "Models",
 			"stat.providers": "{count} providers",
 			"stat.tokens": "Tokens",
@@ -640,20 +664,32 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	font-size: 11px; font-weight: 500;
 }
 
-/* ---- the tunnel status bar on the overview tab ---- */
-[${STYLE_ATTR}] .gw-bar {
-	display: flex; align-items: center; gap: var(--gw-s3);
-	padding: 11px var(--gw-s4);
+/* ---- the live status bar on the overview ----
+   One strip carries everything that is true right now: running, port, uptime,
+   model count, tunnel. The tunnel used to get its own full-width bar directly
+   under the header, which made it read as a second headline competing with the
+   page title; as one cell among peers it says the same thing at the weight it
+   deserves. */
+[${STYLE_ATTR}] .gw-statusbar {
+	display: flex; align-items: center; min-height: 42px;
 	border-radius: var(--dsw-radius-md);
 	border: 1px solid var(--dsw-alias-border-l2);
 	background: var(--dsw-alias-bg-layer-1);
+	overflow: hidden;
 }
-[${STYLE_ATTR}] .gw-bar-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
-[${STYLE_ATTR}] .gw-bar-name { font-size: 13px; font-weight: 600; }
-[${STYLE_ATTR}] .gw-bar-meta {
-	color: var(--dsw-alias-label-tertiary); font-size: 12px;
-	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+[${STYLE_ATTR}] .gw-scell {
+	display: flex; align-items: center; gap: var(--gw-s2);
+	padding: 0 var(--gw-s3); height: 42px; min-width: 0;
+	border-right: 1px solid var(--dsw-alias-border-l2);
 }
+[${STYLE_ATTR}] .gw-slabel { color: var(--dsw-alias-label-caption); font-size: 11.5px; white-space: nowrap; }
+[${STYLE_ATTR}] .gw-svalue {
+	font-weight: 600; font-size: 12.5px; white-space: nowrap;
+	font-variant-numeric: tabular-nums;
+}
+[${STYLE_ATTR}] .gw-svalue.is-calm { font-weight: 500; color: var(--dsw-alias-label-secondary); }
+[${STYLE_ATTR}] .gw-sgrow { flex: 1 1 auto; }
+[${STYLE_ATTR}] .gw-sact { padding: 0 var(--gw-s3); flex: none; }
 
 /* ---- the rotation callout: only rendered when a route's cursor has moved ----
    There is no clock behind it any more, so this is a neutral notice rather than
@@ -672,32 +708,83 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	font-weight: 700; font-size: 13px; line-height: 1.5;
 }
 [${STYLE_ATTR}] .gw-rot b { font-variant-numeric: tabular-nums; }
+/* Inside a tile the notice is a footnote, not a banner: same wording, a layer
+   down in emphasis so the traffic figures above it stay the subject. */
+[${STYLE_ATTR}] .gw-rot.is-inline {
+	margin-top: auto; padding: 8px 9px;
+	border-color: var(--dsw-alias-border-l1);
+	background: var(--dsw-alias-bg-layer-2);
+	font-size: 11px; line-height: 1.55;
+}
 [${STYLE_ATTR}] .gw-rot code {
 	font-family: var(--dsw-font-mono); font-size: 11.5px;
 	background: var(--dsw-alias-bg-layer-2); padding: 0 4px; border-radius: var(--dsw-radius-xs);
 }
 
-/* ---- metric tiles ---- */
-[${STYLE_ATTR}] .gw-stats {
-	display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
+/* ---- the three overview panels ----
+   Requests get the wider column because the sparkline needs horizontal room to
+   be readable; tokens and traffic are stacks of labelled figures and read fine
+   in a narrower one. */
+[${STYLE_ATTR}] .gw-tiles {
+	display: grid; grid-template-columns: 1.15fr 1fr 1fr;
 	gap: var(--gw-s2);
+	align-items: stretch;
 }
-[${STYLE_ATTR}] .gw-stat {
-	display: flex; flex-direction: column; gap: 1px; min-width: 0;
-	padding: 9px var(--gw-s3);
+[${STYLE_ATTR}] .gw-tile {
+	display: flex; flex-direction: column; min-width: 0;
+	padding: 12px var(--gw-s3) 13px;
 	border-radius: var(--dsw-radius-md);
 	border: 1px solid var(--dsw-alias-border-l2);
 	background: var(--dsw-alias-bg-layer-1);
 }
-[${STYLE_ATTR}] .gw-stat-value {
-	font-size: 19px; font-weight: 600; line-height: 1.25;
+[${STYLE_ATTR}] .gw-tile-head { display: flex; align-items: center; gap: var(--gw-s2); color: var(--dsw-alias-label-caption); font-size: 11px; letter-spacing: .3px; }
+[${STYLE_ATTR}] .gw-tile-note { margin-left: auto; font-size: 10.5px; color: var(--dsw-alias-label-caption); font-variant-numeric: tabular-nums; }
+[${STYLE_ATTR}] .gw-tile-big { display: flex; align-items: baseline; gap: 4px; margin-top: 6px; min-width: 0; }
+[${STYLE_ATTR}] .gw-tile-big b {
+	font-size: 23px; font-weight: 600; line-height: 1.1;
+	letter-spacing: -.4px; font-variant-numeric: tabular-nums;
+}
+[${STYLE_ATTR}] .gw-tile-big .gw-unit { font-size: 11.5px; color: var(--dsw-alias-label-caption); }
+[${STYLE_ATTR}] .gw-tile-aside {
+	margin-left: auto; font-size: 11px; color: var(--dsw-alias-label-caption);
+	white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+[${STYLE_ATTR}] .gw-tile-aside.is-bad { color: var(--dsw-alias-state-error-primary); }
+
+/* Requests per minute. Bars are drawn from the host's per-minute counts, so the
+   shape is measured rather than decorative. A bar with any failure in it is
+   tinted; the newest bar is solid so "now" is findable at a glance. */
+[${STYLE_ATTR}] .gw-spark { display: flex; align-items: flex-end; gap: 2px; height: 44px; margin-top: auto; padding-top: 10px; }
+[${STYLE_ATTR}] .gw-spark i {
+	flex: 1 1 0; min-height: 2px; border-radius: 2px 2px 0 0;
+	background: var(--dsw-alias-state-business-primary); opacity: .42;
+}
+[${STYLE_ATTR}] .gw-spark i.is-failed { background: var(--dsw-alias-state-error-primary); opacity: .85; }
+[${STYLE_ATTR}] .gw-spark i.is-now { opacity: .95; }
+[${STYLE_ATTR}] .gw-spark-empty { margin-top: auto; padding-top: 10px; height: 44px; display: flex; align-items: center; color: var(--dsw-alias-label-caption); font-size: 11px; }
+[${STYLE_ATTR}] .gw-axis {
+	display: flex; justify-content: space-between; margin-top: 4px;
+	font-size: 10px; color: var(--dsw-alias-label-caption);
 	font-variant-numeric: tabular-nums;
 }
-[${STYLE_ATTR}] .gw-stat-label { color: var(--dsw-alias-label-tertiary); font-size: 11.5px; }
-[${STYLE_ATTR}] .gw-stat-hint {
-	color: var(--dsw-alias-label-caption); font-size: 11px;
-	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+
+/* Token composition: three parts of one total, so the bars share a scale. */
+[${STYLE_ATTR}] .gw-mix { display: grid; gap: 6px; margin-top: 10px; }
+[${STYLE_ATTR}] .gw-mixrow {
+	display: grid; grid-template-columns: 58px minmax(0, 1fr) 62px;
+	align-items: center; gap: var(--gw-s2);
+	font-size: 11px; color: var(--dsw-alias-label-caption);
 }
+[${STYLE_ATTR}] .gw-track { height: 5px; border-radius: 3px; background: var(--dsw-alias-bg-layer-2); overflow: hidden; }
+[${STYLE_ATTR}] .gw-track i { display: block; height: 100%; border-radius: 3px; background: var(--dsw-alias-state-business-primary); }
+[${STYLE_ATTR}] .gw-track i.is-cache { background: var(--dsw-alias-state-success-primary); }
+[${STYLE_ATTR}] .gw-track i.is-out { background: var(--dsw-alias-state-warn-primary); }
+[${STYLE_ATTR}] .gw-mixval { text-align: right; color: var(--dsw-alias-label-secondary); font-variant-numeric: tabular-nums; }
+
+/* Small label/value pairs inside a tile. */
+[${STYLE_ATTR}] .gw-fine { display: grid; gap: 5px; margin-top: 9px; font-size: 11.5px; }
+[${STYLE_ATTR}] .gw-finerow { display: flex; justify-content: space-between; gap: var(--gw-s2); color: var(--dsw-alias-label-caption); }
+[${STYLE_ATTR}] .gw-finerow b { color: var(--dsw-alias-label-secondary); font-weight: 500; font-variant-numeric: tabular-nums; }
 
 /* ---- tables ---- */
 [${STYLE_ATTR}] .gw-table {
@@ -722,11 +809,16 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 [${STYLE_ATTR}] .gw-tnum { font-variant-numeric: tabular-nums; }
 [${STYLE_ATTR}] .gw-mono { font-family: var(--dsw-font-mono); }
 
-/* call-overview grid: time / model / served-by / input / cache / output / result.
+/* call-overview grid: time / served-by / input / cache / output / result.
+   The requested alias column is gone: every row in a single-route install names
+   the same alias, so it repeated one word ten times and squeezed the column
+   that actually varies. That the caller asked for one model and a different one
+   answered is still visible — the served cell turns amber and carries the
+   explanation in its title.
    Every numeric column is right-aligned so figures of different widths line up
    on their units, which is what makes a token column scannable; the result
    badge is centred because it is a shape rather than prose. */
-[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 74px minmax(0, 1.05fr) minmax(0, 1.35fr) 84px 84px 78px 62px; }
+[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 70px minmax(0, 1fr) 84px 84px 78px 104px; }
 [${STYLE_ATTR}] .gw-grid-recent > .gw-tnum,
 [${STYLE_ATTR}] .gw-grid-recent > .gw-th-num { text-align: right; }
 [${STYLE_ATTR}] .gw-grid-recent > .gw-tmid,
@@ -1512,14 +1604,13 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	   cap is again the right tool: without it either list would dominate. */
 	[${STYLE_ATTR}] .gw-pick-list { max-height: 220px; }
 	[${STYLE_ATTR}] .gw-chain-list { max-height: 180px; }
-	[${STYLE_ATTR}] .gw-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	[${STYLE_ATTR}] .gw-tiles { grid-template-columns: minmax(0, 1fr); }
 	[${STYLE_ATTR}] .gw-picks { grid-template-columns: minmax(0, 1fr); }
 	[${STYLE_ATTR}] .gw-usage-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 	[${STYLE_ATTR}] .gw-grid-recent { grid-template-columns: 64px minmax(0, 1fr) 76px; }
+	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(3),
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(4),
-	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(5),
-	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(6),
-	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(7) { display: none; }
+	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(5) { display: none; }
 	[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 118px minmax(0, 1fr) 90px 112px; }
 	[${STYLE_ATTR}] .gw-kv { align-items: flex-start; flex-direction: column; }
 	[${STYLE_ATTR}] .gw-kv-ctl { max-width: 100%; width: 100%; }
@@ -2252,9 +2343,85 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			 * persisted counters, not from the rows on screen, so paging through
 			 * the log never changes them.
 			 */
+			/**
+			 * The per-minute bars the host computed from the same rows the table
+			 * pages. A page of ten rows cannot produce a time series, so this is
+			 * the one figure on the tab that does not come from the slice on
+			 * screen.
+			 */
+			const seriesBars = Array.isArray(status?.series?.bars) ? status.series.bars : [];
+
+			const sparkline = () => {
+				if (seriesBars.length === 0) {
+					return h("div", { className: "gw-spark-empty" }, t("stat.seriesEmpty"));
+				}
+				const counts = seriesBars.map((bar) => ({
+					ok: Number(bar?.ok) || 0,
+					failed: Number(bar?.failed) || 0,
+				}));
+				const peak = Math.max(1, ...counts.map((count) => count.ok + count.failed));
+				return h(
+					"div",
+					{ className: "gw-spark" },
+					counts.map((count, index) => {
+						const total = count.ok + count.failed;
+						// A quarter-height floor keeps an idle minute visible as a
+						// tick rather than as a gap in the chart.
+						const height = total === 0 ? 2 : Math.max(3, Math.round((total / peak) * 40));
+						const classes = [
+							count.failed > 0 ? "is-failed" : "",
+							index === counts.length - 1 ? "is-now" : "",
+						]
+							.filter((name) => name.length > 0)
+							.join(" ");
+						return h("i", {
+							key: `bar-${index}`,
+							className: classes,
+							style: { height: `${height}px` },
+							title: fill(t("stat.barTitle"), {
+								time: clockOf(bar_at(index)),
+								ok: count.ok,
+								failed: count.failed,
+							}),
+						});
+					}),
+				);
+			};
+
+			/** The minute a bar covers, for its tooltip. */
+			const bar_at = (index) => {
+				const at = Number(seriesBars[index]?.at);
+				return Number.isFinite(at) ? at : 0;
+			};
+
+			/**
+			 * `HH:MM` for the axis under the bars. Seconds would be noise on an
+			 * axis whose ticks are whole minutes apart.
+			 */
+			const minuteLabel = (ms) => clockOf(ms).slice(0, 5);
+
+			const sparkAxis = () => {
+				if (seriesBars.length === 0) return null;
+				return h(
+					"div",
+					{ className: "gw-axis" },
+					h("span", null, minuteLabel(bar_at(0))),
+					h("span", null, minuteLabel(bar_at(seriesBars.length - 1))),
+				);
+			};
+
+			/**
+			 * The three overview panels.
+			 *
+			 * Requests lead because they are the number that moves; tokens and
+			 * traffic follow as composition rather than as more headline figures.
+			 * The rotation notice lives in the traffic panel instead of its own
+			 * full-width strip: it is a statement about routing, but it is only
+			 * ever one line and a third full-width band under the status bar left
+			 * the page looking like a stack of unrelated banners.
+			 */
 			const usageSummary = () => {
 				const totals = usageTotals ?? {};
-				const calls = Number.isFinite(status?.requests) ? status.requests : (totals.calls ?? 0);
 				const input = Number.isFinite(totals.inputTokens) ? totals.inputTokens : 0;
 				const output = Number.isFinite(totals.outputTokens) ? totals.outputTokens : 0;
 				const cached = Number.isFinite(totals.cacheReadTokens) ? totals.cacheReadTokens : 0;
@@ -2262,27 +2429,117 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 				// Cache reads are part of the input, so the ratio is bounded by 100
 				// even if an adapter reports them separately.
 				const hitRate = input > 0 ? Math.min(100, (cached / input) * 100) : 0;
-				const perCall = calls > 0 ? volume / calls : 0;
-				const card = (key, label, value, hint) =>
+				const perCall = requests > 0 ? volume / requests : 0;
+				const failRate = requests > 0 ? (failures / requests) * 100 : 0;
+
+				// One denominator for all three bars: they are parts of a total, and
+				// scaling each to its own maximum would draw three full bars and
+				// hide the fact that output is a rounding error beside input.
+				const share = (part) => (volume > 0 ? Math.max(1, Math.min(100, (part / volume) * 100)) : 0);
+				const mixRow = (key, label, value, width, barClass) =>
 					h(
 						"div",
-						{ className: "gw-stat-card", key },
-						h("div", { className: "gw-stat-k" }, label),
-						h("div", { className: "gw-stat-v" }, value),
-						h("div", { className: "gw-stat-h" }, hint),
+						{ className: "gw-mixrow", key },
+						h("span", null, label),
+						h(
+							"span",
+							{ className: "gw-track" },
+							h("i", { className: barClass, style: { width: `${width.toFixed(1)}%` } }),
+						),
+						h("span", { className: "gw-mixval" }, formatTokens(value)),
 					);
+
+				const fineRow = (key, label, value) =>
+					h(
+						"div",
+						{ className: "gw-finerow", key },
+						h("span", null, label),
+						h("b", null, value),
+					);
+
+				const received = Number.isFinite(bytes?.in) ? bytes.in : 0;
+				const sent = Number.isFinite(bytes?.out) ? bytes.out : 0;
+
 				return h(
 					"div",
-					{ className: "gw-usage-stats" },
-					card("calls", t("recent.calls"), formatCount(calls), t("recent.callsHint")),
-					card("volume", t("recent.volume"), formatTokens(volume), t("recent.volumeHint")),
-					card(
-						"hit",
-						t("recent.hitRate"),
-						`${hitRate.toFixed(1)}%`,
-						fill(t("recent.hitRateHint"), { cached: formatTokens(cached) }),
+					{ className: "gw-tiles" },
+					// ---- requests, with the sparkline
+					h(
+						"div",
+						{ className: "gw-tile", key: "requests" },
+						h(
+							"div",
+							{ className: "gw-tile-head" },
+							h("span", null, t("stat.requests")),
+							seriesBars.length > 0
+								? h("span", { className: "gw-tile-note" }, fill(t("stat.window"), { minutes: seriesBars.length }))
+								: null,
+						),
+						h(
+							"div",
+							{ className: "gw-tile-big" },
+							h("b", null, formatCount(requests)),
+							h("span", { className: "gw-unit" }, t("stat.callsUnit")),
+							h(
+								"span",
+								{ className: `gw-tile-aside ${failures > 0 ? "is-bad" : ""}` },
+								fill(t("stat.failedRate"), { count: failures, rate: failRate.toFixed(1) }),
+							),
+						),
+						sparkline(),
+						sparkAxis(),
 					),
-					card("avg", t("recent.average"), formatTokens(Math.round(perCall)), t("recent.averageHint")),
+					// ---- tokens, as composition
+					h(
+						"div",
+						{ className: "gw-tile", key: "tokens" },
+						h("div", { className: "gw-tile-head" }, h("span", null, t("stat.tokens"))),
+						h(
+							"div",
+							{ className: "gw-tile-big" },
+							h("b", null, usageTotals === null ? "—" : formatTokens(volume)),
+						),
+						usageTotals === null
+							? h("div", { className: "gw-fine" }, h("div", { className: "gw-finerow" }, h("span", null, t("stat.noData"))))
+							: h(
+									"div",
+									{ className: "gw-mix" },
+									mixRow("in", t("stat.input"), input, share(input), ""),
+									mixRow("cache", t("stat.cache"), cached, share(cached), "is-cache"),
+									mixRow("out", t("stat.output"), output, share(output), "is-out"),
+								),
+						usageTotals === null
+							? null
+							: h(
+									"div",
+									{ className: "gw-fine" },
+									fineRow("hit", t("recent.hitRate"), `${hitRate.toFixed(1)}%`),
+									fineRow("avg", t("recent.average"), fill(t("stat.perCall"), { value: formatTokens(Math.round(perCall)) })),
+								),
+					),
+					// ---- traffic, plus the rotation notice when a cursor moved
+					h(
+						"div",
+						{ className: "gw-tile", key: "traffic" },
+						h("div", { className: "gw-tile-head" }, h("span", null, t("stat.traffic"))),
+						h(
+							"div",
+							{ className: "gw-tile-big" },
+							h("b", null, bytes === null ? "—" : formatBytes(received + sent)),
+						),
+						h(
+							"div",
+							{ className: "gw-fine" },
+							fineRow("rx", t("stat.received"), bytes === null ? "—" : formatBytes(received)),
+							fineRow("tx", t("stat.sent"), bytes === null ? "—" : formatBytes(sent)),
+							fineRow(
+								"per",
+								t("stat.perRequest"),
+								bytes === null || requests === 0 ? "—" : formatBytes(Math.round((received + sent) / requests)),
+							),
+						),
+						rotationStrip(),
+					),
 				);
 			};
 
@@ -2328,58 +2585,89 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			// moved", which is normal operation.
 			const faultCount = Object.keys(faults).length;
 
-			const statTile = (key, label, value, hint) =>
-				h(
-					"div",
-					{ className: "gw-stat", key },
-					h("span", { className: "gw-stat-value" }, value),
-					h("span", { className: "gw-stat-label" }, label),
-					h("span", { className: "gw-stat-hint" }, hint),
-				);
-
 			/* ------------------------------------------------------ panels */
 
-			/** The tunnel status bar, on the overview: one line, one action. */
-			const tunnelBar = () => {
-				const dot = tunnelStatus === "running" ? "is-on" : tunnelStatus === "starting" ? "is-warn" : tunnelStatus === "failed" ? "is-bad" : "";
-				return h(
-					"div",
-					{ className: "gw-bar" },
-					h("span", { className: `gw-dot ${dot}` }),
-					h(
-						"div",
-						{ className: "gw-bar-main" },
-						h("span", { className: "gw-bar-name" }, t("tunnel.title")),
-						h(
-							"span",
-							{ className: "gw-bar-meta" },
-							tunnelRunning && tunnelUrl.length > 0
-								? `${tunnelUrl}/v1`
-								: tunnel?.provider
-									? `${tunnelLabel} · ${tunnel.provider}`
-									: tunnelLabel,
-						),
-					),
+			/**
+			 * The live status bar: everything that is true right now, in one row.
+			 *
+			 * These five facts used to be split across a tunnel bar and two rows of
+			 * five tiles, so "port 8787" and "15,285 requests" carried the same
+			 * visual weight even though one is a setting and the other is the work
+			 * the gateway has done. Here the settings are a strip and the work gets
+			 * the panels below it.
+			 */
+			const statusBar = () => {
+				const dot = !isOn
+					? "is-bad"
+					: tunnelStatus === "running"
+						? "is-on"
+						: tunnelStatus === "starting"
+							? "is-warn"
+							: "is-on";
+				const cell = (key, label, value) =>
 					h(
 						"span",
-						{ className: "gw-badge is-idle" },
-						tunnel?.provider ? String(tunnel.provider) : t("page.tunnelUnconfigured"),
-					),
+						{ className: "gw-scell", key },
+						h("span", { className: "gw-slabel" }, label),
+						h("span", { className: "gw-svalue" }, value),
+					);
+				const port = Number.isFinite(status?.port) ? String(status.port) : "—";
+				return h(
+					"div",
+					{ className: "gw-statusbar" },
 					h(
-						"button",
-						{ type: "button", className: "gw-btn", onClick: () => openTab("tunnel") },
-						t("tab.tunnel"),
+						"span",
+						{ className: "gw-scell", key: "state" },
+						h("span", { className: `gw-dot ${dot}` }),
+						h("span", { className: "gw-svalue" }, isOn ? t("page.on") : t("page.off")),
+					),
+					cell("port", t("page.port"), port),
+					cell("uptime", t("stat.uptime"), formatDuration(uptime)),
+					cell("models", t("stat.models"), `${allIds.length} / ${providerCount}`),
+					tunnelRunning && tunnelUrl.length > 0
+						? h(
+								"span",
+								{ className: "gw-scell", key: "tunnel" },
+								h("span", { className: "gw-slabel" }, t("tab.tunnel")),
+								h("span", { className: "gw-svalue is-calm", title: `${tunnelUrl}/v1` }, `${tunnelUrl}/v1`),
+							)
+						: h(
+								"span",
+								{ className: "gw-scell", key: "tunnel" },
+								h("span", { className: "gw-dot is-idle" }),
+								h("span", { className: "gw-slabel" }, t("tab.tunnel")),
+								h(
+									"span",
+									{ className: "gw-svalue is-calm" },
+									tunnel?.provider ? `${tunnelLabel} · ${tunnel.provider}` : t("page.tunnelUnconfigured"),
+								),
+							),
+					h("span", { className: "gw-sgrow" }),
+					h(
+						"span",
+						{ className: "gw-sact" },
+						h(
+							"button",
+							{ type: "button", className: "gw-btn is-sm", onClick: () => openTab("tunnel") },
+							t("tab.tunnel"),
+						),
 					),
 				);
 			};
 
-			/** The rotation strip: only meaningful when a cursor has left the head. */
+			/**
+			 * The rotation notice: only meaningful when a cursor has left the head.
+			 *
+			 * Rendered inside the traffic tile rather than as its own full-width
+			 * band, so the overview keeps one banner-shaped element (the status
+			 * bar) instead of three stacked strips that each looked like an alert.
+			 */
 			const rotationStrip = () => {
 				if (movedCount === 0) return null;
 				const lead = rotationRoutes.find((entry) => entry.code !== undefined) ?? rotationRoutes[0];
 				return h(
 					"div",
-					{ className: "gw-rot" },
+					{ className: "gw-rot is-inline" },
 					h("span", { className: "gw-rot-ico" }, "↻"),
 					h(
 						"div",
@@ -2401,49 +2689,8 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 					{ className: `gw-panel ${tab === "overview" ? "is-active" : ""}`, key: "overview" },
 					status === null ? h("div", { className: "gw-empty" }, t("page.loading")) : null,
 					status !== null && !isOn ? h("div", { className: "gw-card" }, t("page.offHint")) : null,
-					status === null ? null : tunnelBar(),
-					rotationStrip(),
-					status === null
-						? null
-						: h(
-								"section",
-								{ className: "gw-stats" },
-								statTile("requests", t("stat.requests"), String(requests), fill(t("stat.failed"), { count: failures })),
-								statTile(
-									"models",
-									t("stat.models"),
-									String(allIds.length),
-									fill(t("stat.providers"), { count: providerCount }),
-								),
-								statTile(
-									"tokens",
-									t("stat.tokens"),
-									usageTotals === null ? "—" : formatTokens(usageTotals.totalTokens),
-									usageTotals === null
-										? t("stat.noData")
-										: fill(t("stat.tokenHint"), {
-												input: formatTokens(usageTotals.inputTokens),
-												output: formatTokens(usageTotals.outputTokens),
-											}),
-								),
-								statTile(
-									"traffic",
-									t("stat.traffic"),
-									bytes === null ? "—" : formatBytes((bytes.in ?? 0) + (bytes.out ?? 0)),
-									bytes === null
-										? t("stat.noData")
-										: fill(t("stat.trafficHint"), {
-												input: formatBytes(bytes.in),
-												output: formatBytes(bytes.out),
-											}),
-								),
-								statTile(
-									"uptime",
-									t("stat.uptime"),
-									formatDuration(uptime),
-									fill(t("stat.since"), { time: clockOf(status.startedAt) }),
-								),
-							),
+					status === null ? null : statusBar(),
+					status === null ? null : usageSummary(),
 					// Call overview: all-time totals plus the retained detail log.
 					// This is what turns "it dropped again" into a cause, so it
 					// belongs on the landing tab.
@@ -2479,7 +2726,6 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 								),
 							),
 						),
-						usageSummary(),
 						noticeFor("usage"),
 						recent.length === 0
 							? h("div", { className: "gw-card gw-empty" }, t("recent.empty"))
@@ -2493,7 +2739,6 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 											"div",
 											{ className: "gw-trow gw-thead gw-grid-recent" },
 											h("span", { className: "gw-tnum gw-th-num" }, t("recent.time")),
-											h("span", null, t("recent.model")),
 											h("span", null, t("recent.servedBy")),
 											h("span", { className: "gw-tnum gw-th-num" }, t("recent.input")),
 											h("span", { className: "gw-tnum gw-th-num" }, t("recent.cache")),
@@ -2509,14 +2754,25 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 												// What actually served: the failover target, which is the
 												// fact a debugging session needs — the caller named one
 												// model, a different one may have answered.
+												//
+												// Rows written before the trace carried a target, and
+												// failed calls that never reached one, have no
+												// provider/upstreamModel pair. Falling back to the
+												// recorded model keeps the column readable instead of
+												// printing a dash for every such row now that the
+												// separate requested-alias column is gone.
 												const served =
 													typeof entry?.provider === "string" && typeof entry?.upstreamModel === "string"
 														? `${entry.provider}/${entry.upstreamModel}`
-														: (entry?.provider ?? "—");
-												const moved =
-													typeof entry?.model === "string" &&
-													served !== "—" &&
-													entry.model !== served;
+														: (entry?.provider ?? entry?.model ?? "—");
+												// Failover happened when the request had to walk past
+												// the target it started on. Comparing the requested
+												// alias with the served id cannot answer that — an
+												// alias is a name like `deepseek-flash`, so it never
+												// equals `loomy/deepseek-v4-flash-1017` and every row
+												// would have been marked as a move. The trace records
+												// the index it landed on, which is the real fact.
+												const moved = Number(entry?.failoverIndex) > 0;
 												const cell = (value) =>
 													usage === undefined || usage === null || !Number.isFinite(Number(value))
 														? "—"
@@ -2525,7 +2781,6 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 													"div",
 													{ className: "gw-trow gw-grid-recent", key: `${entry?.at ?? index}-${index}` },
 													h("span", { className: "gw-tcell gw-tnum" }, clockOf(entry?.at)),
-													h("span", { className: "gw-tcell gw-mono", title: entry?.model }, entry?.model ?? "—"),
 													h(
 														"span",
 														{ className: "gw-tcell gw-mono", title: served },

@@ -142,6 +142,17 @@ const STATUS = {
   requests: 7,
   failures: 0,
   usageTotals: { inputTokens: 118740, outputTokens: 4211, totalTokens: 122951, calls: 5 },
+  /* Four minutes of history, one with a failure, so the sparkline has a shape
+     and the tinted-bar branch is exercised. */
+  series: {
+    minutes: 4,
+    bars: [
+      { at: 1793960040000, ok: 2, failed: 0 },
+      { at: 1793960100000, ok: 3, failed: 0 },
+      { at: 1793960160000, ok: 1, failed: 1 },
+      { at: 1793960220000, ok: 1, failed: 0 },
+    ],
+  },
   bytes: { in: 48210, out: 163842 },
   recent: [
     {
@@ -260,15 +271,16 @@ await check('the dashboard layout is present', () => {
     'gw-head',
     'gw-tabs',
     'gw-panel',
-    'gw-stats',
+    'gw-statusbar',
+    'gw-tiles',
     'gw-card',
     'gw-table',
   ]) {
     assert.ok(used.has(required), `layout class ${required} missing; saw: ${[...used].join(', ')}`)
   }
-  /* Five metric tiles: requests, models, tokens, traffic, uptime. */
-  const tiles = [...used].filter((name) => name === 'gw-stat')
-  assert.ok(tiles.length === 1, 'sanity: gw-stat is a class name, counted once')
+  /* Three panels: requests, tokens, traffic. */
+  const tiles = [...used].filter((name) => name === 'gw-tile')
+  assert.ok(tiles.length === 1, 'sanity: gw-tile is a class name, counted once')
 })
 
 await check('the tab bar carries the five panels in order', () => {
@@ -323,34 +335,60 @@ await check('the tunnel tab reports the running tunnel', () => {
   assert.ok(texts.includes('ngrok'), 'the provider should be named')
 })
 
-await check('the overview bar links the tunnel state to its tab', () => {
+await check('the overview status bar carries the live state', () => {
   const used = classes(rendered)
-  assert.ok(used.has('gw-bar'), 'the overview tunnel bar is missing')
-  assert.ok(used.has('gw-bar-meta'), 'the overview tunnel bar has no detail line')
-  assert.ok(texts.includes('tunnel.title'), 'the overview bar should name the tunnel')
+  assert.ok(used.has('gw-statusbar'), 'the overview status bar is missing')
+  assert.ok(used.has('gw-scell'), 'the status bar has no cells')
+  /* Running, port, uptime, model/provider counts, tunnel — each on one line.
+     These used to be split between a tunnel bar and two rows of tiles, which is
+     what made the page read as competing headlines. */
+  for (const key of ['page.on', 'page.port', 'stat.uptime', 'stat.models', 'tab.tunnel']) {
+    assert.ok(texts.includes(key), `the status bar does not report ${key}`)
+  }
 })
 
-
-await check('the metric tiles read the host counters', () => {
+await check('the three overview panels read the host counters', () => {
   const used = classes(rendered)
-  assert.ok(used.has('gw-stat'), 'no metric tiles')
+  for (const required of ['gw-tile', 'gw-tile-head', 'gw-tile-big']) {
+    assert.ok(used.has(required), `panel class ${required} missing`)
+  }
   /* requests=7, failures=0, 2 models, 2 providers */
   assert.ok(texts.includes('7'), `the request count is missing; saw: ${texts.join(' | ')}`)
-  assert.ok(texts.includes('stat.failed'), 'the failure hint key is missing')
+  assert.ok(texts.includes('stat.failedRate'), 'the failure rate key is missing')
   /* usageTotals totalTokens 122951 renders as 123k */
   assert.ok(
     texts.includes('123k'),
     `the token total should be abbreviated; saw: ${texts.filter((t) => /k$|M$/.test(t)).join(', ')}`,
   )
-  assert.ok(
-    texts.includes('stat.tokenHint'),
-    'the token in/out hint is missing',
-  )
+  /* Input, cache and output are three labelled parts of one total. */
+  for (const key of ['stat.input', 'stat.cache', 'stat.output']) {
+    assert.ok(texts.includes(key), `the token mix is missing ${key}`)
+  }
+  assert.ok(used.has('gw-track'), 'the token mix has no proportion bars')
   /* bytes 48210 + 163842 = 212052 -> 207.1 KB */
   assert.ok(
     texts.some((entry) => entry.endsWith('KB')),
-    `the traffic tile should show bytes; saw: ${texts.filter((t) => t.includes('B')).join(', ')}`,
+    `the traffic panel should show bytes; saw: ${texts.filter((t) => t.includes('B')).join(', ')}`,
   )
+})
+
+await check('the requests panel draws the host time series', () => {
+  const used = classes(rendered)
+  assert.ok(used.has('gw-spark'), 'the sparkline is missing')
+  assert.ok(used.has('gw-axis'), 'the sparkline has no time axis')
+  /* The fixture carries four bars with one failure, so one bar must be tinted
+     and the newest must be marked as the minute in progress. */
+  assert.ok(used.has('is-failed'), 'a minute with a failure should be tinted')
+  assert.ok(used.has('is-now'), 'the newest minute should be marked')
+  assert.ok(texts.includes('stat.window'), 'the panel should say how much history it covers')
+})
+
+await check('a host without a series says so instead of drawing nothing', () => {
+  const bareTree = render({ ...STATUS, series: undefined })
+  const bareClasses = classes(bareTree)
+  const bareTexts = collect(bareTree)
+  assert.ok(bareTexts.includes('stat.seriesEmpty'), 'a missing series needs an empty state')
+  assert.ok(!bareClasses.has('gw-spark'), 'an empty series must not draw an empty chart')
 })
 
 await check('a host without counters says so instead of showing zero', () => {
@@ -546,13 +584,14 @@ await check('the call overview shows both outcomes and the split token columns',
   )
 })
 
-await check('the call overview carries the four all-time cards', () => {
-  for (const key of ['recent.calls', 'recent.volume', 'recent.hitRate', 'recent.average']) {
-    assert.ok(texts.includes(key), `the ${key} card is missing`)
+await check('the overview carries the cache and average figures', () => {
+  /* These used to be two of four all-time cards. The totals moved into the
+     panels, so what is left to check is that the two derived figures still
+     travel with them rather than having been dropped in the redesign. */
+  for (const key of ['recent.hitRate', 'recent.average']) {
+    assert.ok(texts.includes(key), `the ${key} figure is missing`)
   }
-  /* Each card is label / figure / one `unit·hint` line. */
-  assert.ok(texts.includes('recent.callsHint'), 'the calls card has no unit line')
-  assert.ok(texts.includes('recent.volumeHint'), 'the volume card has no unit line')
+  assert.ok(texts.includes('stat.perCall'), 'the per-call figure has no unit line')
 })
 
 await check('the overview offers a pager and a clear button', () => {

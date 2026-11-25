@@ -72,6 +72,14 @@ const RECENT_LIMIT = 1000
 const USAGE_RETENTION_DAYS = 30
 /** How many detail rows one page of the dashboard shows. */
 const USAGE_PAGE_SIZE = 10
+/**
+ * Minutes of history the overview sparkline covers.
+ *
+ * Short on purpose: the bar is there to show whether traffic is landing right
+ * now, not to be an analytics chart. A longer window would need its own
+ * aggregation table, and the retained log already answers anything wider.
+ */
+const USAGE_SERIES_MINUTES = 24
 /** Usage is flushed this long after the last request, so a burst costs one write. */
 const USAGE_FLUSH_MS = 4000
 /**
@@ -3359,6 +3367,9 @@ async function statusPayload(ctx, state, ttl, refresh, usagePage = 1) {
     // settles, so these survive a restart and a plugin update instead of
     // resetting to zero.
     usageTotals: { ...state.usageTotals },
+    // Per-minute request counts for the overview sparkline. Read from the same
+    // retained rows the table pages, so the bar and the log can never disagree.
+    series: { minutes: USAGE_SERIES_MINUTES, bars: usageSeries(state.recent) },
     // The retained log is paged server-side: thirty days of rows would be
     // hundreds of kilobytes on every page load, and the table shows ten.
     usage: pagedUsage,
@@ -3386,6 +3397,38 @@ function usagePayload(state, page) {
     persisted: state.usagePersisted === true,
     rows: state.recent.slice(start, start + USAGE_PAGE_SIZE).map((entry) => ({ ...entry })),
   }
+}
+
+/**
+ * Requests per minute over the last `minutes`, for the overview sparkline.
+ *
+ * Derived from the retained log rather than kept as a second counter. The rows
+ * already carry `at` and `outcome`, so a bucket is a count — and a stored
+ * histogram would be one more thing to migrate, flush and get out of sync with
+ * the list it is meant to summarise. The cost is a single pass over at most
+ * `RECENT_LIMIT` rows per status read.
+ *
+ * Buckets are aligned to the wall clock minute, so the newest bar is the minute
+ * in progress and it fills as requests arrive.
+ */
+function usageSeries(recent, minutes = USAGE_SERIES_MINUTES) {
+  const bucketMs = 60_000
+  const newest = Math.floor(Date.now() / bucketMs) * bucketMs
+  const oldest = newest - (minutes - 1) * bucketMs
+  const bars = Array.from({ length: minutes }, (_, index) => ({
+    at: oldest + index * bucketMs,
+    ok: 0,
+    failed: 0,
+  }))
+  for (const entry of recent) {
+    const at = Number(entry?.at)
+    if (!Number.isFinite(at) || at < oldest) continue
+    const index = Math.min(minutes - 1, Math.floor((at - oldest) / bucketMs))
+    if (index < 0) continue
+    if (entry.outcome === 'ok') bars[index].ok += 1
+    else if (entry.outcome !== 'aborted') bars[index].failed += 1
+  }
+  return bars
 }
 
 /**
