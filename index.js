@@ -99,39 +99,6 @@ const ROTATION_MAX_LAPS = 1
  */
 const TARGET_FAULT_TTL_MS = 10 * 60_000
 /**
- * Failures that mean "this target cannot serve right now, another one might":
- * quota, throttling, timeouts, upstream faults and unreachable hosts.
- *
- * Deliberately not the request-shape codes (INVALID_REQUEST, UNSUPPORTED_*,
- * CONTEXT_WINDOW_EXCEEDED). Those describe the caller's own payload, so every
- * other target would reject it identically — walking the whole list would just
- * multiply the latency of an answer that is never going to change.
- *
- * UNKNOWN_MODEL and NO_ADAPTER are the exceptions, and they belong here: a
- * target that names a model the provider no longer advertises, or a provider
- * this profile no longer registers, says nothing about the caller's payload and
- * nothing about the other targets either. Both are stale rows in one alias
- * entry. Leaving UNKNOWN_MODEL out stopped a whole chain: one renamed upstream
- * model made an eight-target route answer 502 without ever trying the healthy
- * targets behind it. Leaving NO_ADAPTER out did the same thing a level higher up
- * — a provider renamed under the plugin's feet (`our-free-model` becoming
- * `opencode-free`) had the chain answer the caller 400 "no adapter registered"
- * while five healthy targets sat untouched behind it. The catalogue drifts
- * whenever a profile re-registers a provider, so this is a routine event, not an
- * exceptional one.
- */
-const FAILOVER_CODES = new Set([
-  'QUOTA',
-  'QUOTA_EXCEEDED',
-  'RATE_LIMIT',
-  'TIMEOUT',
-  'TRANSPORT',
-  'SERVER',
-  'EMPTY_RESPONSE',
-  'UNKNOWN_MODEL',
-  'NO_ADAPTER',
-])
-/**
  * Model ids/names that look vision-capable, used to reorder a route when the
  * request carries images. Deliberately broad: putting a text model first costs
  * one wasted round-trip (the placeholder answer), while putting nothing first
@@ -180,13 +147,58 @@ const QUOTA_ERROR_PATTERN =
  * opencode-zen" while eight healthy targets sat behind it untouched.
  *
  * Walking past such a target costs one round-trip and is the only way the route
- * can keep serving. It is not a licence to walk the list on every error — the
- * pattern is deliberately narrow and names the concrete misconfigurations.
+ * can keep serving.
  */
 const TARGET_CONFIG_ERROR_PATTERN =
-  /(?:no api key for provider|no api key (?:configured|set|found)|missing api key|api key (?:is )?not (?:configured|set)|no credentials? (?:for|configured)|invalid api key for provider|provider .* has no api key)/i
-/** Statuses that describe the target, not the caller's payload. */
-const FAILOVER_STATUSES = new Set([402, 408, 425, 429, 500, 502, 503, 504, 529])
+  /(?:no api key for provider|no api key (?:configured|set|found)|missing api key|api key (?:is )?not (?:configured|set)|no credentials? (?:for|configured)|invalid api key for provider|provider .* has no api key|credential-rejected|not able to authenticate you|all accounts? (?:are )?(?:excluded|exhausted)|no available accounts?)/i
+/**
+ * Failures that are the caller's own request, and the only ones that end a
+ * route.
+ *
+ * This list is the whole design. Every earlier version of this function was an
+ * allowlist — "fail over when the code is one of these, or the status is one of
+ * these, or the sentence contains one of these" — and every version leaked.
+ * 402 leaked, then 429 in Chinese, then 401 from a relay whose pooled accounts
+ * had all been rejected. Each fix added one more entry to a list that was
+ * already too short, which is why the same bug kept arriving in a new costume:
+ * a rule that enumerates the ways a target can fail can only ever be as
+ * complete as the last incident.
+ *
+ * Inverting it is what makes the behaviour predictable. A failure is assumed to
+ * belong to the target and the next one is tried, unless it is provably about
+ * the request the caller sent — in which case every other target would answer
+ * identically and walking the list only multiplies the latency of a refusal
+ * that cannot change. That set is small, stable, and does not grow when a
+ * provider invents a new way to be unavailable.
+ *
+ * `NO_ADAPTER`, `UNKNOWN_MODEL` and `QUOTA_EXCEEDED` deliberately stay out:
+ * they name a stale row or a spent account, not a malformed request.
+ */
+const CALLER_ERROR_CODES = new Set([
+  'INVALID_REQUEST',
+  'INVALID_PREPARED_CALL',
+  'UNSUPPORTED_OPTION',
+  'UNSUPPORTED_CONTENT',
+  'UNSUPPORTED_REASONING_EFFORT',
+  'INVALID_MODEL_REASONING',
+  'INVALID_CATALOG',
+  'CONTEXT_WINDOW_EXCEEDED',
+  'IMAGE_OFFLOAD_REQUIRED',
+])
+/**
+ * Statuses that describe the payload rather than the target.
+ *
+ * 401 and 403 are missing on purpose. The caller never reaches an upstream with
+ * the gateway's own credential problem — the gateway authenticates its clients
+ * itself, before routing — so an upstream 401/403 is always the *target's*
+ * credential being refused, which is exactly what another target can survive.
+ * Leaving them out is what made a relay answer "every remaining pooled account
+ * is excluded (out-of-credit, credential-rejected)" and stop the route dead.
+ *
+ * 408, 425 and 429 are absent for the same reason in the other direction: a
+ * timeout, an early hint and a throttle are the target's, never the payload's.
+ */
+const CALLER_ERROR_STATUSES = new Set([400, 413, 415, 422])
 const KEY_PREFIX = 'sk-dsh-'
 /** Service keys for the HTTP surface, newest name first. */
 const WEB_SERVER_KEYS = ['webServer', 'httpServer']
@@ -1523,46 +1535,63 @@ function faultReason(fault) {
  * Adapters that relay an upstream body prefix it with the status instead of
  * setting a `status` field: pi-ai produces
  * `402: {"message":"…积分已耗尽（http 429）…"}` with `code: PI_AI_ERROR` and no
- * `status` at all. Reading only the field therefore left `FAILOVER_STATUSES`
- * unused — the list already contains 402 and 429, but the number never reached
- * it, so a spent account ended the route after one target.
+ * `status` at all, and the relayed 401 reads the same way. Reading only the
+ * field left the whole status rule unused, so a spent or rejected account ended
+ * the route after one target.
  *
- * Only a three-digit number at the very start, followed by `:` or whitespace,
- * counts. That is the shape the adapters actually emit; `1500 tokens exceeded`
- * cannot match because the fourth character is not a delimiter.
+ * Only a status followed by `:` or by a JSON body counts:
+ *
+ *   402: {"message":"…"}      ← what pi-ai emits
+ *   502 {"error":{…}}         ← a body with no colon
+ *
+ * Requiring the delimiter is what keeps an ordinary sentence out. `1500 tokens
+ * exceeded` and `400 tokens is too many` both start with digits, and a looser
+ * rule read the second one as an HTTP 400 — which, now that 400 ends a route,
+ * would stop a healthy chain on a sentence that never mentioned a status.
  */
 function statusOf(failure) {
   if (typeof failure?.status === 'number' && Number.isFinite(failure.status)) return failure.status
-  const match = /^\s*(\d{3})\s*[:\s]/.exec(messageOf(failure))
+  const match = /^\s*(\d{3})\s*(?::|\{)/.exec(messageOf(failure))
   return match === null ? undefined : Number(match[1])
 }
 
 /**
  * Why a failure should move on to the next target, or `undefined` to stop.
  *
+ * The rule is inverted on purpose: **fail over unless the failure is provably
+ * the caller's own request.** See `CALLER_ERROR_CODES` for why — every
+ * allowlist version of this function leaked a new status, and the leak always
+ * looked like "the route did not move when the target was unavailable", which
+ * is the one job this function has.
+ *
+ * Order matters. A quota or credential sentence is checked *before* the status,
+ * because relays routinely dress a spent account as a 400 and a rejected pool
+ * as a 401 — the sentence is the only part that says what actually happened.
+ *
  * A committed stream is never failed over: the caller has already seen part of
  * an answer, and replaying the request elsewhere would either duplicate it or
- * silently replace it with a different one.
- *
- * The decision reads `code`, then `status`, then the message. Matching only on
- * `code` was too narrow: an adapter that surfaces a bare upstream 429 — as the
- * OpenCode free-tier limit does, with no `code` at all — was treated as
- * unrecoverable, so the route stopped at the spent target instead of handing
- * the request to the next one. The same gap hid a target whose provider has no
- * credential: the pi-ai adapter answers `PI_AI_ERROR` "No API key for provider:
- * …" with no status, which no code test and no quota test recognised, so a
- * nine-target route answered 502 on the first target without trying the rest.
+ * silently replace it with a different one. A caller-cancelled attempt says
+ * nothing about the target either.
  */
 function failoverEligible(failure, { committed }) {
   if (committed) return undefined
   if (failure === undefined || failure === null) return undefined
-  if (typeof failure.code === 'string' && FAILOVER_CODES.has(failure.code)) return failure
-  const status = statusOf(failure)
-  if (status !== undefined && FAILOVER_STATUSES.has(status)) return failure
+
+  const code = typeof failure.code === 'string' ? failure.code : undefined
+  if (code === 'ABORTED') return undefined
+
   const message = messageOf(failure)
+  // Never the caller's fault, whatever status or code it arrived with.
   if (QUOTA_ERROR_PATTERN.test(message)) return failure
   if (TARGET_CONFIG_ERROR_PATTERN.test(message)) return failure
-  return undefined
+
+  if (code !== undefined && CALLER_ERROR_CODES.has(code)) return undefined
+  const status = statusOf(failure)
+  if (status !== undefined && CALLER_ERROR_STATUSES.has(status)) return undefined
+
+  // Any other refusal — a 401, a 403, a 5xx, a bare adapter error, a status
+  // that was never seen before — belongs to the target. Try the next one.
+  return failure
 }
 
 /** The alias targets to try for `requested`, or `undefined` when it is not one. */

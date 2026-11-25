@@ -709,10 +709,11 @@ await check('a request that walked past a dead target is recorded as answered', 
   }
 })
 
-await check('a plain text error that is not a quota failure still stops', async () => {
-  /* The widening must not turn every unlabelled error into a failover. A bare
-     "the model refused" is not about the account, so the next target would
-     answer identically and the route should not be walked. */
+await check('an unlabelled error is tried on the next target', async () => {
+  /* The rule is inverted: a failure belongs to the target unless it is provably
+     about the caller's request. An adapter that dies with a sentence and no
+     status tells us nothing about the payload, so the healthy target behind it
+     gets a turn instead of the caller getting the first target's complaint. */
   const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
     if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
     return {
@@ -727,12 +728,66 @@ await check('a plain text error that is not a quota failure still stops', async 
     }
   })
   try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.ok(res.text.includes('served-by:b/two'), 'an unlabelled refusal ended the route')
+    assert.deepEqual(app.llm.calls, ['a/one', 'b/two'], `wrong order: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a malformed request still stops at the first target', async () => {
+  /* The other half of the inversion: a payload the upstream cannot parse would
+     be refused by every target identically, so walking the list only multiplies
+     the latency of a refusal that cannot change. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { code: 'INVALID_REQUEST', status: 400, message: 'messages[1].role is not valid' },
+          },
+        }
+      },
+    }
+  })
+  try {
     await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
-    assert.deepEqual(
-      app.llm.calls,
-      ['a/one'],
-      `an ordinary error was replayed across targets: ${JSON.stringify(app.llm.calls)}`,
-    )
+    assert.deepEqual(app.llm.calls, ['a/one'], `a caller error was replayed: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a 400 that is really a spent account is still failed over', async () => {
+  /* The sentence wins over the status. Relays routinely dress a quota refusal
+     as a 400, and 400 is in the stop set — so the quota check has to run first
+     or this would end the route on the target that had run out. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { code: 'PI_AI_ERROR', message: '400: {"message":"积分已耗尽，请购买加量包"}' },
+          },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `a 400-shaped quota refusal ended the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:b/two'))
   } finally {
     app.stop()
   }
@@ -864,10 +919,11 @@ await check('a spent account answers the caller the upstream status, not 502', a
   }
 })
 
-await check('a numeric-looking message that is not a status still stops', async () => {
-  /* `statusOf` reads a leading three-digit status, so it must not treat an
-     ordinary sentence that merely starts with digits as one. `1500 tokens…`
-     has a fourth digit where a delimiter has to be. */
+await check('a sentence starting with a number is not read as a status', async () => {
+  /* `statusOf` reads a leading `NNN:` or `NNN {`, so a prose sentence that
+     merely begins with digits must not become one. `400 tokens is too many`
+     used to parse as an HTTP 400 — and since 400 now ends a route, that would
+     stop a healthy chain on a sentence that never mentioned a status at all. */
   const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
     if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
     return {
@@ -876,14 +932,86 @@ await check('a numeric-looking message that is not a status still stops', async 
         app.llm.calls.push('a/one')
         yield {
           type: 'finish',
-          reason: { kind: 'error', failure: { message: '1500 tokens exceeded the limit for this model' } },
+          reason: { kind: 'error', failure: { message: '400 tokens is too many for this model' } },
         }
       },
     }
   })
   try {
     await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
-    assert.deepEqual(app.llm.calls, ['a/one'], `a non-status number was read as one: ${JSON.stringify(app.llm.calls)}`)
+    assert.deepEqual(
+      app.llm.calls,
+      ['a/one', 'b/two'],
+      `a number in prose was read as a status: ${JSON.stringify(app.llm.calls)}`,
+    )
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a relayed 401 with every pooled account rejected is failed over', async () => {
+  /* The reported failure. The relay's pool had been emptied — every account
+     out of credit or with its credential refused — and it answered 401 with the
+     reason buried in a nested JSON string:
+
+       401: {"message":"{\"code\":1001,\"message\":\"We're sorry, but we are not
+       able to authenticate you…\"} (every remaining pooled account is excluded
+       (out-of-credit, credential-rejected))","type":"authentication",…}
+
+     401 was never in the old status allowlist, so the route stopped on the
+     first target. Under the inverted rule it does not have to be: a 401 from an
+     upstream is the *target's* credential being refused, since the gateway
+     authenticates its own callers before routing. */
+  const relayed =
+    '401: {"message":"{\\"code\\":1001,\\"message\\":\\"We\'re sorry, but we are not able to authenticate you. ' +
+    'If you continue to experience issues, please contact our support team for assistance.\\"} ' +
+    '(every remaining pooled account is excluded (out-of-credit, credential-rejected))","type":"authentication"}'
+  const app = await bootCustom(
+    { flash: ['workbuddy/one', 'trae/two'] },
+    (original) => async (config) => {
+      if (`${config.provider}/${config.model}` !== 'workbuddy/one') return original(config)
+      return {
+        config,
+        async *stream() {
+          app.llm.calls.push('workbuddy/one')
+          yield {
+            type: 'finish',
+            reason: { kind: 'error', failure: { code: 'PI_AI_ERROR', message: relayed } },
+          }
+        },
+      }
+    },
+  )
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `a relayed 401 killed the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:trae/two'), 'the healthy target was never tried')
+    assert.deepEqual(app.llm.calls, ['workbuddy/one', 'trae/two'], `wrong order: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a 403 from an upstream credential is failed over too', async () => {
+  /* The same class with a different number. The point of the inversion is that
+     this check did not have to be written for 403 specifically. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { code: 'PI_AI_ERROR', message: '403: {"error":"forbidden"}' } },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `a 403 killed the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:b/two'))
   } finally {
     app.stop()
   }
