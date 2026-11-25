@@ -543,7 +543,16 @@ await check('the same target listed twice is tried once', async () => {
  * private DSH_HOME so one check's persisted routes cannot leak into another.
  */
 async function bootCustom(aliases, install) {
-  const llm = fakeLlm({ 'b/two': 'ok' })
+  // Every target an alias names must exist in the catalogue, or the alias is
+  // dropped while it loads and the check fails with a 404 about the alias
+  // instead of exercising the route it was written for. The behaviour table is
+  // left empty on purpose: `fakeLlm` serves any target it was not given a plan
+  // for, and `install` is what injects the failure each check is about.
+  const catalogue = {}
+  for (const targets of Object.values(aliases)) {
+    for (const target of Array.isArray(targets) ? targets : [targets]) catalogue[target] = 'ok'
+  }
+  const llm = fakeLlm(catalogue)
   const ctx = fakeCtx(llm)
   const previousHome = process.env.DSH_HOME
   const bootHome = mkdtempSync(join(tmpdir(), 'gw-failover-custom-'))
@@ -745,6 +754,136 @@ await check('a 402 payment refusal is failed over', async () => {
     const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
     assert.equal(res.status, 200, `a 402 killed the route: ${res.text.slice(0, 300)}`)
     assert.ok(res.text.includes('served-by:b/two'))
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a relayed Chinese quota refusal is failed over', async () => {
+  /* The reported failure, reproduced verbatim from usage.json. workbuddy sits
+     in front of the provider and translates the upstream answer, so the first
+     target surfaced:
+
+       code:    PI_AI_ERROR
+       status:  (none)
+       message: 402: {"message":"workbuddy 上游失败：积分已耗尽（http 429）：池中已
+                无可用账号（2 个账号积分耗尽、1 个账号被限流）（code 14018）…"}
+
+     Three separate tests could not see this. `PI_AI_ERROR` is not in
+     FAILOVER_CODES; `status` was never set, so the 402 and 429 already listed in
+     FAILOVER_STATUSES were never consulted; and the sentence is Chinese, which
+     the English quota list did not match. The route therefore stopped on the
+     spent account after a single attempt.
+
+     Both gaps are covered here: the `402:` prefix is read as the status, and the
+     Chinese wording is recognised on its own. */
+  const relayed =
+    '402: {"message":"workbuddy 上游失败：积分已耗尽（http 429）：池中已无可用账号（2 个账号积分耗尽、1 个账号被限流）（code 14018）。' +
+    '{\\"error\\":{\\"data\\":{\\"code\\":14018,\\"msg\\":\\"额度已用尽，请访问以下链接，购买加量包以获取更多额度：' +
+    'https://www.codebuddy.cn/profile/usage\\",\\"requestId\\":\\"abc\\"}}}"}'
+  const app = await bootCustom(
+    { flash: ['workbuddy/one', 'trae/two', 'loomy/three'] },
+    (original) => async (config) => {
+      if (`${config.provider}/${config.model}` !== 'workbuddy/one') return original(config)
+      return {
+        config,
+        async *stream() {
+          app.llm.calls.push('workbuddy/one')
+          yield {
+            type: 'finish',
+            reason: { kind: 'error', failure: { code: 'PI_AI_ERROR', message: relayed } },
+          }
+        },
+      }
+    },
+  )
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `a relayed Chinese quota refusal killed the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:trae/two'), 'the healthy target behind the spent account was never tried')
+    assert.deepEqual(app.llm.calls, ['workbuddy/one', 'trae/two'], `wrong order: ${JSON.stringify(app.llm.calls)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a Chinese quota sentence with no status prefix still fails over', async () => {
+  /* The same refusal with nothing but the translated sentence: no `status`, no
+     `402:`, no English keyword. Wording must not decide the route. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { code: 'PI_AI_ERROR', message: '上游失败：额度已用尽，请购买加量包' },
+          },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 200, `a Chinese quota sentence stopped the route: ${res.text.slice(0, 300)}`)
+    assert.ok(res.text.includes('served-by:b/two'))
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a spent account answers the caller the upstream status, not 502', async () => {
+  /* When every target is spent the caller still needs the real reason. The
+     status used to come from the code's own mapping, so `PI_AI_ERROR` became
+     502 — which every OpenAI client reads as "the gateway is broken" instead of
+     "the account is out of quota". */
+  const app = await bootCustom({ flash: ['a/one'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: {
+            kind: 'error',
+            failure: { code: 'PI_AI_ERROR', message: '402: {"message":"积分已耗尽（http 429）"}' },
+          },
+        }
+      },
+    }
+  })
+  try {
+    const res = await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.equal(res.status, 402, `expected the upstream 402, got ${res.status}: ${res.text.slice(0, 200)}`)
+  } finally {
+    app.stop()
+  }
+})
+
+await check('a numeric-looking message that is not a status still stops', async () => {
+  /* `statusOf` reads a leading three-digit status, so it must not treat an
+     ordinary sentence that merely starts with digits as one. `1500 tokens…`
+     has a fourth digit where a delimiter has to be. */
+  const app = await bootCustom({ flash: ['a/one', 'b/two'] }, (original) => async (config) => {
+    if (`${config.provider}/${config.model}` !== 'a/one') return original(config)
+    return {
+      config,
+      async *stream() {
+        app.llm.calls.push('a/one')
+        yield {
+          type: 'finish',
+          reason: { kind: 'error', failure: { message: '1500 tokens exceeded the limit for this model' } },
+        }
+      },
+    }
+  })
+  try {
+    await post(app.port, app.state.apiKey, { model: 'flash', messages: MESSAGES })
+    assert.deepEqual(app.llm.calls, ['a/one'], `a non-status number was read as one: ${JSON.stringify(app.llm.calls)}`)
   } finally {
     app.stop()
   }

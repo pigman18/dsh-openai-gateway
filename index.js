@@ -155,9 +155,18 @@ const VISION_MODEL_PATTERN =
  * limited account is exactly the case another target can survive, so the two
  * agree about what the error *means* while disagreeing about who can fix it —
  * the host cannot switch accounts, this gateway can.
+ *
+ * The wording is matched in both languages on purpose. A relay in front of the
+ * upstream does not pass the provider's sentence through unchanged — workbuddy
+ * answers `积分已耗尽（http 429）：池中已无可用账号（2 个账号积分耗尽、1 个账号被
+ * 限流）`, which contains no English quota phrase at all. Matching only the
+ * English list meant a spent account was treated as a caller error, so the
+ * route stopped on the target that had run out instead of trying the healthy
+ * ones behind it — the exact failure this whole function exists to prevent,
+ * reintroduced by translation.
  */
 const QUOTA_ERROR_PATTERN =
-  /(?:GoUsageLimitError|FreeUsageLimitError|usage limit reached|usage limit exceeded|quota exceeded|insufficient_quota|available balance|out of budget|insufficient balance|billing|payment required|rate limit|too many requests)/i
+  /(?:GoUsageLimitError|FreeUsageLimitError|usage limit reached|usage limit exceeded|quota exceeded|insufficient_quota|available balance|out of budget|insufficient balance|billing|payment required|rate limit|too many requests|积分已耗尽|积分耗尽|额度已用尽|额度用尽|额度已耗尽|账号积分|购买加量包|被限流|限流|余额不足|配额不足|配额已用尽)/i
 /**
  * Failures that mean the target itself is not wired up: no credential for its
  * provider, a credential that the adapter cannot read, a base URL that is gone.
@@ -1437,7 +1446,9 @@ function advanceRotation(state, alias, targets, servedTarget, failure) {
 function recordTargetFault(state, target, failure) {
   if (typeof target !== 'string' || target.length === 0) return
   const code = typeof failure?.code === 'string' ? failure.code : undefined
-  const status = Number.isFinite(failure?.status) ? failure.status : undefined
+  // The same reading the dispatcher uses, so the badge and the walk agree about
+  // what the upstream actually said.
+  const status = statusOf(failure)
   const message = messageOf(failure)
   // A caller-cancelled attempt says nothing about the target.
   if (code === 'ABORTED' || message.length === 0) return
@@ -1507,6 +1518,26 @@ function faultReason(fault) {
 }
 
 /**
+ * The HTTP status a failure names, from the field or from the sentence.
+ *
+ * Adapters that relay an upstream body prefix it with the status instead of
+ * setting a `status` field: pi-ai produces
+ * `402: {"message":"…积分已耗尽（http 429）…"}` with `code: PI_AI_ERROR` and no
+ * `status` at all. Reading only the field therefore left `FAILOVER_STATUSES`
+ * unused — the list already contains 402 and 429, but the number never reached
+ * it, so a spent account ended the route after one target.
+ *
+ * Only a three-digit number at the very start, followed by `:` or whitespace,
+ * counts. That is the shape the adapters actually emit; `1500 tokens exceeded`
+ * cannot match because the fourth character is not a delimiter.
+ */
+function statusOf(failure) {
+  if (typeof failure?.status === 'number' && Number.isFinite(failure.status)) return failure.status
+  const match = /^\s*(\d{3})\s*[:\s]/.exec(messageOf(failure))
+  return match === null ? undefined : Number(match[1])
+}
+
+/**
  * Why a failure should move on to the next target, or `undefined` to stop.
  *
  * A committed stream is never failed over: the caller has already seen part of
@@ -1526,7 +1557,8 @@ function failoverEligible(failure, { committed }) {
   if (committed) return undefined
   if (failure === undefined || failure === null) return undefined
   if (typeof failure.code === 'string' && FAILOVER_CODES.has(failure.code)) return failure
-  if (typeof failure.status === 'number' && FAILOVER_STATUSES.has(failure.status)) return failure
+  const status = statusOf(failure)
+  if (status !== undefined && FAILOVER_STATUSES.has(status)) return failure
   const message = messageOf(failure)
   if (QUOTA_ERROR_PATTERN.test(message)) return failure
   if (TARGET_CONFIG_ERROR_PATTERN.test(message)) return failure
@@ -3397,7 +3429,10 @@ function retryAfterSeconds(failure) {
 
 function sendFailure(res, failure) {
   const code = failure?.code
-  const status = typeof failure?.status === 'number' ? failure.status : statusForCode(code)
+  // `statusOf` also reads the `402:`/`429:` prefix adapters put in front of the
+  // body. Falling back to the code's own mapping answered 502 for a spent
+  // account, which reads as "this gateway is broken" to every OpenAI client.
+  const status = statusOf(failure) ?? statusForCode(code)
   const type =
     status === 401
       ? 'authentication_error'
