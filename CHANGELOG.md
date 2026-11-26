@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.10.5 (2026-11-26)
+
+### Fixed
+
+- **1.10.4 会让整个插件加载失败，重启后侧边栏入口直接消失。** 我在 1.10.4 里用 PowerShell 改了版本号，`Set-Content -Encoding UTF8` 在 Windows PowerShell 5.1 下会给文件**加 UTF-8 BOM**。于是 `package.json` 变成 `EF BB BF 7B`，`JSON.parse` 在第一个字符就报 `Unexpected token`，宿主读不到清单，插件就不注册了。
+
+  ```diff
+  -﻿{
+  +{
+  ```
+
+  这个错误在 diff 里几乎看不出来——BOM 是零宽字符，`git diff` 只表现成行首多了一点。对比历史确认：1.10.3 及之前干净，**只有 1.10.4 带 BOM**。
+
+- **新增 `tests/packaging.spec.mjs` 守卫。** 检查 `package.json`、`client.js`、`index.js`、`cordis.patch.yml` 四个文件都没有 BOM，并校验 `package.json` 能解析、版本号是 semver、`main`/`dsh.bundle.patch` 指向的文件确实存在。清单坏了不该等到重启才发现。
+
+  已加入 `npm test` 链的最前面——它比其他测试都快，坏清单要先报。
+
 ## 1.10.4 (2026-11-26)
 
 ### Fixed
