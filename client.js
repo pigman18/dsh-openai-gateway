@@ -175,6 +175,13 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"tab.settings": "设置",
 			"routes.name": "路由名",
 			"routes.pickHint": "选一条查看完整顺序",
+			"routes.subShort": "给外部客户端的短名字，映射到 provider/model。前面的不可用时自动换下一个，并停在那里接着用。",
+			"routes.allInCatalog": "{count} 个目标 · 目录里都存在",
+			"routes.reorder": "在编辑里调整顺序",
+			"routes.faultQuota": "额度耗尽",
+			"routes.faultAuth": "凭据被拒",
+			"routes.faultRate": "被限流",
+			"routes.faultTimeout": "超时",
 			"routes.chain": "尝试顺序",
 			"routes.health": "健康度",
 			"routes.count": "{count} 条",
@@ -182,10 +189,12 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"routes.moved": "{count} 条已轮换",
 			"routes.movedOne": "已轮换",
 			"routes.movedOneHint": "下一个请求从 {target} 开始",
+			"routes.noteMoved": "当前使用目标不在队首：上一个请求由 {from} 服务，下一次从 {to} 开始，走到底再回到队首。",
 			"routes.detailMovedFrom": "（上一次由 {from} 服务）",
-			"routes.staleNote": "其中 {count} 个已不在目录里",
+			"routes.staleNote": "{count} 个目标 其中 {stale} 个已不在目录里",
 			"routes.cursor": "当前使用",
 			"routes.cursorHint": "下一个请求从这条目标开始",
+			"routes.cursorNote": "健康目标会一直服务，直到它自己也失败",
 			"routes.cursorMovedHint": "上一个请求由 {from} 服务，下一个从这条开始",
 			"routes.fallback": "备用",
 			"routes.primary": "首选",
@@ -404,6 +413,13 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"tab.settings": "Settings",
 			"routes.name": "Route",
 			"routes.pickHint": "pick one to see the full order",
+			"routes.subShort": "A short name for external clients, mapped to provider/model. When one is unavailable the next takes over and keeps serving.",
+			"routes.allInCatalog": "{count} targets · all in the catalogue",
+			"routes.reorder": "reorder in the editor",
+			"routes.faultQuota": "Out of quota",
+			"routes.faultAuth": "Credential rejected",
+			"routes.faultRate": "Throttled",
+			"routes.faultTimeout": "Timed out",
 			"routes.chain": "Try order",
 			"routes.health": "Health",
 			"routes.count": "{count} routes",
@@ -411,10 +427,12 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"routes.moved": "{count} rotated",
 			"routes.movedOne": "Rotated",
 			"routes.movedOneHint": "the next request starts at {target}",
+			"routes.noteMoved": "The target in use is not at the head: the last request was served by {from}, the next one starts at {to}, and it wraps back to the head after the last target.",
 			"routes.detailMovedFrom": "(the last one was served by {from})",
-			"routes.staleNote": "{count} of them are no longer in the catalogue",
+			"routes.staleNote": "{count} targets, {stale} of them no longer in the catalogue",
 			"routes.cursor": "in use",
 			"routes.cursorHint": "The next request starts at this target",
+			"routes.cursorNote": "A healthy target keeps serving until it fails too",
 			"routes.cursorMovedHint": "{from} served the last request; the next one starts here",
 			"routes.fallback": "fallback",
 			"routes.primary": "primary",
@@ -882,6 +900,15 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	display: grid; grid-template-columns: 232px minmax(0, 1fr);
 	gap: var(--gw-s2); align-items: start;
 }
+/* Badge left, actions right, on their own row. Sharing the heading row put the
+   buttons under the description as soon as the text wrapped, which read as a
+   left-aligned pile instead of a toolbar. */
+[${STYLE_ATTR}] .gw-routes-bar {
+	display: flex; align-items: center; gap: var(--gw-s2); flex-wrap: wrap;
+}
+[${STYLE_ATTR}] .gw-routes-bar-actions {
+	margin-left: auto; display: flex; gap: var(--gw-s2); flex: none;
+}
 [${STYLE_ATTR}] .gw-routes-list { padding: 6px; display: grid; gap: 3px; }
 [${STYLE_ATTR}] .gw-ritem {
 	display: flex; align-items: center; gap: var(--gw-s2);
@@ -898,8 +925,14 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
    brand colour (the active tab uses it), and tinting a whole row with it turned
    the selection into a violet block whose label could not be read. */
 [${STYLE_ATTR}] .gw-ritem.is-active {
+	position: relative; isolation: isolate;
 	background: var(--dsw-alias-bg-layer-2);
 	border-color: var(--dsw-alias-state-business-primary);
+}
+[${STYLE_ATTR}] .gw-ritem.is-active::before {
+	content: ""; position: absolute; inset: 0; z-index: -1;
+	border-radius: inherit; pointer-events: none;
+	background: var(--dsw-alias-state-business-primary); opacity: 0.12;
 }
 [${STYLE_ATTR}] .gw-ritem-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--dsw-alias-state-idle-primary); }
 [${STYLE_ATTR}] .gw-ritem-dot.is-ok { background: var(--dsw-alias-state-success-primary); }
@@ -911,7 +944,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 [${STYLE_ATTR}] .gw-ritem.is-active .gw-ritem-alias { font-weight: 600; }
-[${STYLE_ATTR}] .gw-ritem-meta { font-size: 11px; color: var(--dsw-alias-label-tertiary); }
+[${STYLE_ATTR}] .gw-ritem-meta { font-size: 10.5px; color: var(--dsw-alias-label-tertiary); }
 [${STYLE_ATTR}] .gw-ritem-n {
 	flex: none; font-size: 12px; color: var(--dsw-alias-label-tertiary);
 	font-variant-numeric: tabular-nums;
@@ -934,15 +967,26 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
    Tinted rather than plain: it is an explanation, and the steps below it are
    the evidence. */
 [${STYLE_ATTR}] .gw-dnote {
+	position: relative; isolation: isolate;
 	display: flex; align-items: flex-start; gap: var(--gw-s2);
 	margin: var(--gw-s3) var(--gw-s4) 0;
 	padding: 9px 11px;
 	border-radius: var(--dsw-radius-sm);
 	border: 1px solid var(--dsw-alias-border-l2);
-	border-left: 2px solid var(--dsw-alias-state-business-primary);
 	background: var(--dsw-alias-bg-layer-2);
 	color: var(--dsw-alias-label-secondary);
 	font-size: 11.5px; line-height: 1.6;
+}
+/* A 10% brand wash, which is what the design shows.
+   There is no "soft brand surface" token — the brand colour at full strength is
+   a bright fill that no text survives — and the stylesheet is not allowed to
+   write a literal rgba. A low-opacity pseudo-element behind the content gets the
+   same result using only tokens: isolation keeps the negative z-index inside
+   this box instead of dropping it behind the card. */
+[${STYLE_ATTR}] .gw-dnote::before {
+	content: ""; position: absolute; inset: 0; z-index: -1;
+	border-radius: inherit; pointer-events: none;
+	background: var(--dsw-alias-state-business-primary); opacity: 0.1;
 }
 [${STYLE_ATTR}] .gw-dnote-ico { color: var(--dsw-alias-state-business-primary); flex: none; }
 [${STYLE_ATTR}] .gw-dnote code {
@@ -978,7 +1022,9 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	color: var(--dsw-alias-label-tertiary); line-height: 1.55;
 	overflow: hidden; text-overflow: ellipsis;
 }
-[${STYLE_ATTR}] .gw-step-note.is-bad { color: var(--dsw-alias-state-error-primary); }
+/* Notes stay neutral. The design tints the tag and the number, not the sentence:
+   a column of red prose reads as an alarm rather than as an explanation. */
+[${STYLE_ATTR}] .gw-step-note.is-bad { color: var(--dsw-alias-label-tertiary); }
 
 [${STYLE_ATTR}] .gw-step-tag {
 	flex: none; font-size: 10.5px; line-height: 18px; padding: 0 7px;
@@ -1034,6 +1080,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	font-size: 11.5px; color: var(--dsw-alias-label-caption);
 }
 [${STYLE_ATTR}] .gw-dfoot-warn { color: var(--dsw-alias-state-warn-label); }
+[${STYLE_ATTR}] .gw-dfoot-actions { margin-left: auto; display: flex; gap: var(--gw-s2); flex: none; }
 
 /* ---- badges ---- */
 [${STYLE_ATTR}] .gw-badge {
@@ -1062,10 +1109,13 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	color: var(--dsw-alias-label-tertiary);
 	border-color: var(--dsw-alias-border-l2);
 }
+/* Outline only. --dsw-alias-state-business-tertiary is the bright brand fill,
+   so text in business-primary on top of it was violet on violet — the badge
+   looked empty rather than unreadable, which is the worse failure. */
 [${STYLE_ATTR}] .gw-badge.is-brand {
 	color: var(--dsw-alias-state-business-primary);
 	border-color: var(--dsw-alias-state-business-primary);
-	background: var(--dsw-alias-state-business-tertiary);
+	background: transparent;
 }
 /* A retired target: it will not recover on its own, so it is marked differently
    from the hop the cursor currently starts on. Dashed border reads as "this row
@@ -2923,6 +2973,25 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 				);
 
 			/**
+			 * A two-word label for what went wrong, for the tag beside the target.
+			 *
+			 * The design this pane came from showed 额度耗尽 and 凭据被拒 rather than a
+			 * generic 故障, and that distinction is the reason someone opens the tab:
+			 * an account out of credit is fixed by waiting or topping up, a rejected
+			 * credential needs a new key. Both arrive as opaque adapter text — the
+			 * same text the 故障 tag used to swallow — so the label is derived from
+			 * it, most specific first.
+			 */
+			const faultTag = (fault) => {
+				const text = `${fault?.code ?? ""} ${fault?.message ?? ""} ${fault?.reason ?? ""}`.toLowerCase()
+				if (/quota|额度|积分|余额|credit|payment|billing|\b429\b/.test(text)) return t("routes.faultQuota")
+				if (/auth|credential|unauthor|凭据|账号|token|\b401\b|\b403\b/.test(text)) return t("routes.faultAuth")
+				if (/rate|限流|throttle|\b429\b/.test(text)) return t("routes.faultRate")
+				if (/timeout|超时|\b504\b/.test(text)) return t("routes.faultTimeout")
+				return t("routes.fault")
+			};
+
+			/**
 			 * One step of a route chain, as the detail pane draws it.
 			 *
 			 * A vertical rail rather than a horizontal row of chips: the order *is*
@@ -2955,7 +3024,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 											? t("routes.faultHint")
 											: fill(t("routes.faultHint"), { reason: fault.message }),
 								},
-								t("routes.fault"),
+								faultTag(fault),
 							)
 						: isCursor
 							? h(
@@ -2982,7 +3051,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 					: isFault
 						? (fault.reason ?? fault.message ?? t("routes.faultHint"))
 						: isCursor
-							? null
+							? t("routes.cursorNote")
 							: index === 0
 								? cursor === undefined
 									? t("routes.primaryHint")
@@ -3482,16 +3551,19 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 					0,
 				);
 				const healthy = movedCount === 0 && faultCount === 0 && staleCount === 0;
+				// Rotation is the news ("something moved"), so it leads; a fault or a
+				// stale row only takes the badge when nothing is rotating. Green is
+				// reserved for "nothing at all", which is what keeps it from claiming
+				// 全部可用 above a red row.
 				const summary = {
-					tone: faultCount > 0 || staleCount > 0 ? "is-bad" : healthy ? "is-ok" : "is-brand",
-					text:
-						faultCount > 0
-							? fill(t("routes.faultCount"), { count: faultCount })
-							: staleCount > 0
-								? fill(t("routes.goneCount"), { count: staleCount })
-								: healthy
-									? t("routes.healthy")
-									: fill(t("routes.moved"), { count: movedCount }),
+					tone: healthy ? "is-ok" : movedCount > 0 ? "is-warn" : "is-bad",
+					text: healthy
+						? t("routes.healthy")
+						: movedCount > 0
+							? fill(t("routes.moved"), { count: movedCount })
+							: faultCount > 0
+								? fill(t("routes.faultCount"), { count: faultCount })
+								: fill(t("routes.goneCount"), { count: staleCount }),
 				};
 				// Null focus means "the first route": a fresh load, or the deletion
 				// of the selected route, both land on something real.
@@ -3511,9 +3583,13 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 				 * each other.
 				 */
 				const healthOf = (cursor, gone, broken) => {
+					// Cursor first, as the design shows: "已轮换" is what the tab is
+					// about, and the steps below already name each refusal. A route that
+					// is both rotated and broken therefore reads as rotated here and
+					// broken there, which is the division the panel is built on.
+					if (cursor !== undefined) return { tone: "is-brand", text: t("routes.movedOne") };
 					if (gone > 0) return { tone: "is-bad", text: fill(t("routes.goneCount"), { count: gone }) };
 					if (broken > 0) return { tone: "is-bad", text: fill(t("routes.faultCount"), { count: broken }) };
-					if (cursor !== undefined) return { tone: "is-brand", text: t("routes.movedOne") };
 					return { tone: "is-ok", text: t("routes.healthy") };
 				};
 
@@ -3535,12 +3611,19 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 									h("h2", { className: "gw-sec-title" }, t("page.alias")),
 									h("span", { className: "gw-sec-inline-hint" }, t("routes.pickHint")),
 								),
-								h("p", { className: "gw-sec-sub" }, t("page.aliasHint")),
+								h("p", { className: "gw-sec-sub" }, t("routes.subShort")),
 							),
+						),
+						// Its own row, buttons flush right. Inside the head they shared a
+						// line with the description and wrapped to the left the moment the
+						// text got long, which is not what the design shows.
+						h(
+							"div",
+							{ className: "gw-routes-bar" },
+							h("span", { className: `gw-badge ${summary.tone}` }, summary.text),
 							h(
 								"div",
-								{ className: "gw-sec-side" },
-								h("span", { className: `gw-badge ${summary.tone}` }, summary.text),
+								{ className: "gw-routes-bar-actions" },
 								h(
 									"button",
 									{ type: "button", className: "gw-btn", onClick: () => openEditor("add", null) },
@@ -3578,7 +3661,15 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 													onClick: () => setRouteFocus(row.alias),
 												},
 												h("span", {
-													className: `gw-ritem-dot ${gone > 0 || broken > 0 ? "is-bad" : cursor !== undefined ? "is-brand" : "is-ok"}`,
+													// Same order as the health badge beside it, or the dot and the
+													// sentence under it would disagree about the same route.
+													className: `gw-ritem-dot ${
+														cursor !== undefined
+															? "is-brand"
+															: gone > 0 || broken > 0
+																? "is-bad"
+																: "is-ok"
+													}`,
 												}),
 												h(
 													"span",
@@ -3631,11 +3722,12 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 															h(
 																"span",
 																null,
-																fill(t("routes.movedOneHint"), { target: focusedCursor.next ?? "—" }),
-																focusedCursor.movedFrom === undefined ? null : [
-																		" ",
-																		fill(t("routes.detailMovedFrom"), { from: focusedCursor.movedFrom }),
-																	],
+																focusedCursor.movedFrom === undefined
+																	? fill(t("routes.movedOneHint"), { target: focusedCursor.next ?? "—" })
+																	: fill(t("routes.noteMoved"), {
+																			from: focusedCursor.movedFrom,
+																			to: focusedCursor.next ?? "—",
+																		}),
 															),
 														),
 												h(
@@ -3648,10 +3740,22 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 												h(
 													"div",
 													{ className: "gw-dfoot" },
-													h("span", null, fill(t("routes.targetCount"), { count: focused.targets.length })),
-													focusedGone === 0
-														? null
-														: h("span", { className: "gw-dfoot-warn" }, fill(t("routes.staleNote"), { count: focusedGone })),
+													h(
+														"span",
+														null,
+														focusedGone === 0
+															? fill(t("routes.allInCatalog"), { count: focused.targets.length })
+															: fill(t("routes.staleNote"), { count: focused.targets.length, stale: focusedGone }),
+													),
+													h(
+														"div",
+														{ className: "gw-dfoot-actions" },
+														h(
+															"button",
+															{ type: "button", className: "gw-btn is-sm", onClick: () => openEditor("edit", focused) },
+															t("routes.reorder"),
+														),
+													),
 												),
 											),
 								),

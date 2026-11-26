@@ -18,6 +18,15 @@ const end = SOURCE.indexOf('`;', start)
 assert.ok(end > start, 'the CSS template literal is unterminated')
 const css = SOURCE.slice(start + 'const CSS = `'.length, end)
 
+/* A backtick inside the stylesheet closes the template literal and turns the
+ * rest of the CSS into JavaScript. The error it produces points at the opening
+ * line of the literal, not at the comment that caused it, so it has been written
+ * three times by accident — once is enough. Caught here, at the source. */
+assert.ok(
+  !css.includes('`'),
+  'the stylesheet contains a backtick; it would close the CSS template literal early',
+)
+
 /* Colour-bearing properties. `font:` is excluded: it carries size and family. */
 const PROPS = [
   'color',
