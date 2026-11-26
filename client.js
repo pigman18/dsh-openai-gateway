@@ -174,6 +174,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"tab.catalog": "目录",
 			"tab.settings": "设置",
 			"routes.name": "路由名",
+			"routes.pickHint": "选一条查看完整顺序",
 			"routes.chain": "尝试顺序",
 			"routes.health": "健康度",
 			"routes.count": "{count} 条",
@@ -402,6 +403,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"tab.catalog": "Catalogue",
 			"tab.settings": "Settings",
 			"routes.name": "Route",
+			"routes.pickHint": "pick one to see the full order",
 			"routes.chain": "Try order",
 			"routes.health": "Health",
 			"routes.count": "{count} routes",
@@ -655,6 +657,10 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	gap: var(--gw-s3); flex-wrap: wrap;
 }
 [${STYLE_ATTR}] .gw-sec-titles { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+/* Title and its one-line hint share a row so the hint reads as a caption to the
+   heading rather than as a second paragraph competing with the description. */
+[${STYLE_ATTR}] .gw-sec-title-row { display: flex; align-items: baseline; gap: var(--gw-s2); flex-wrap: wrap; min-width: 0; }
+[${STYLE_ATTR}] .gw-sec-inline-hint { font-size: 11.5px; color: var(--dsw-alias-label-caption); }
 [${STYLE_ATTR}] .gw-sec-title {
 	margin: 0; display: inline-flex; align-items: center; gap: var(--gw-s2);
 	font: var(--dsw-font-s-14); font-weight: 600; line-height: 1.35;
@@ -3466,7 +3472,27 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			};
 
 			const routesPanel = () => {
-				const healthy = movedCount === 0 && faultCount === 0;
+				// The eye goes to this badge first, so it must not say "all healthy"
+				// while a route below it is carrying a target the catalogue has
+				// dropped. `faultCount` only counts targets that refused, and
+				// `movedCount` only counts cursors, so a stale row used to leave the
+				// summary green next to a red "1 个已失效" in the list.
+				const staleCount = aliasRows.reduce(
+					(sum, row) => sum + row.targets.filter((target) => isUnavailable(target)).length,
+					0,
+				);
+				const healthy = movedCount === 0 && faultCount === 0 && staleCount === 0;
+				const summary = {
+					tone: faultCount > 0 || staleCount > 0 ? "is-bad" : healthy ? "is-ok" : "is-brand",
+					text:
+						faultCount > 0
+							? fill(t("routes.faultCount"), { count: faultCount })
+							: staleCount > 0
+								? fill(t("routes.goneCount"), { count: staleCount })
+								: healthy
+									? t("routes.healthy")
+									: fill(t("routes.moved"), { count: movedCount }),
+				};
 				// Null focus means "the first route": a fresh load, or the deletion
 				// of the selected route, both land on something real.
 				const focused = aliasRows.find((row) => row.alias === routeFocus) ?? aliasRows[0];
@@ -3503,21 +3529,18 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 							h(
 								"div",
 								{ className: "gw-sec-titles" },
-								h("h2", { className: "gw-sec-title" }, t("page.alias")),
+								h(
+									"div",
+									{ className: "gw-sec-title-row" },
+									h("h2", { className: "gw-sec-title" }, t("page.alias")),
+									h("span", { className: "gw-sec-inline-hint" }, t("routes.pickHint")),
+								),
 								h("p", { className: "gw-sec-sub" }, t("page.aliasHint")),
 							),
 							h(
 								"div",
 								{ className: "gw-sec-side" },
-								h(
-									"span",
-									{ className: `gw-badge ${faultCount > 0 ? "is-bad" : healthy ? "is-ok" : "is-brand"}` },
-									faultCount > 0
-										? fill(t("routes.faultCount"), { count: faultCount })
-										: healthy
-											? t("routes.healthy")
-											: fill(t("routes.moved"), { count: movedCount }),
-								),
+								h("span", { className: `gw-badge ${summary.tone}` }, summary.text),
 								h(
 									"button",
 									{ type: "button", className: "gw-btn", onClick: () => openEditor("add", null) },
