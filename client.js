@@ -999,11 +999,16 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 [${STYLE_ATTR}] .gw-steps { padding: var(--gw-s3) var(--gw-s4) 2px; display: grid; gap: 0; }
 [${STYLE_ATTR}] .gw-step { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; }
 [${STYLE_ATTR}] .gw-step-rail { display: flex; flex-direction: column; align-items: center; }
+/* Every number is a filled disc, as the design draws it. They were hollow
+   outlines, which is why a run of steps read as a column of empty rings next to
+   the design's solid reds and blues. Filling is also the only way the role is
+   legible at 10px: the colour carries it, not the border. */
 [${STYLE_ATTR}] .gw-step-idx {
 	width: 20px; height: 20px; flex: none; border-radius: 50%;
 	display: inline-flex; align-items: center; justify-content: center;
 	font-size: 10px; font-weight: 600;
 	border: 1px solid var(--dsw-alias-border-l3);
+	background: var(--dsw-alias-bg-layer-3);
 	color: var(--dsw-alias-label-tertiary);
 	font-variant-numeric: tabular-nums;
 }
@@ -1058,10 +1063,27 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	color: var(--dsw-alias-label-primary-foreground);
 }
 [${STYLE_ATTR}] .gw-step.is-fault .gw-step-id { color: var(--dsw-alias-state-error-primary); }
-[${STYLE_ATTR}] .gw-step-idx.is-cursor {
+/* The primary target is a filled disc too, and the cursor gets a soft halo so
+   "first choice" and "the one the next request starts at" are distinguishable
+   when they are the same step. The halo is a low-opacity pseudo-element rather
+   than an rgba box-shadow: the stylesheet may not write literal colours, and the
+   brand token at full strength is far too loud for a ring. */
+[${STYLE_ATTR}] .gw-step-idx.is-first {
 	border-color: transparent;
 	background: var(--dsw-alias-state-business-primary);
 	color: var(--dsw-alias-label-primary-foreground);
+}
+[${STYLE_ATTR}] .gw-step-idx.is-cursor {
+	position: relative; isolation: isolate;
+	border-color: transparent;
+	background: var(--dsw-alias-state-business-primary);
+	color: var(--dsw-alias-label-primary-foreground);
+	box-shadow: 0 0 0 1px var(--dsw-alias-state-business-primary);
+}
+[${STYLE_ATTR}] .gw-step-idx.is-cursor::after {
+	content: ""; position: absolute; inset: -4px; z-index: -1;
+	border-radius: 50%; pointer-events: none;
+	background: var(--dsw-alias-state-business-primary); opacity: 0.22;
 }
 [${STYLE_ATTR}] .gw-step.is-gone .gw-step-id {
 	color: var(--dsw-alias-label-caption);
