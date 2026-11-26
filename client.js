@@ -873,13 +873,13 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
    Splitting the tab in two gives the order room to read top to bottom and leaves
    space under each target for the reason it was skipped. */
 [${STYLE_ATTR}] .gw-routes-split {
-	display: grid; grid-template-columns: 216px minmax(0, 1fr);
+	display: grid; grid-template-columns: 232px minmax(0, 1fr);
 	gap: var(--gw-s2); align-items: start;
 }
-[${STYLE_ATTR}] .gw-routes-list { padding: 5px; display: grid; gap: 2px; }
+[${STYLE_ATTR}] .gw-routes-list { padding: 6px; display: grid; gap: 3px; }
 [${STYLE_ATTR}] .gw-ritem {
 	display: flex; align-items: center; gap: var(--gw-s2);
-	padding: 8px 9px; min-width: 0;
+	padding: 9px 10px; min-width: 0;
 	border-radius: var(--dsw-radius-sm);
 	border: 1px solid transparent;
 	background: transparent; color: inherit; font: inherit;
@@ -887,9 +887,13 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 }
 [${STYLE_ATTR}] .gw-ritem:hover { background: var(--dsw-alias-interactive-bg-hover); }
 [${STYLE_ATTR}] .gw-ritem:focus-visible { outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color); outline-offset: -2px; }
+/* The selection is a shade of the surface plus a brand-coloured edge, not a
+   brand-coloured fill: --dsw-alias-state-business-tertiary is the *bright*
+   brand colour (the active tab uses it), and tinting a whole row with it turned
+   the selection into a violet block whose label could not be read. */
 [${STYLE_ATTR}] .gw-ritem.is-active {
 	background: var(--dsw-alias-bg-layer-2);
-	border-color: var(--dsw-alias-border-l3);
+	border-color: var(--dsw-alias-state-business-primary);
 }
 [${STYLE_ATTR}] .gw-ritem-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--dsw-alias-state-idle-primary); }
 [${STYLE_ATTR}] .gw-ritem-dot.is-ok { background: var(--dsw-alias-state-success-primary); }
@@ -897,78 +901,89 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 [${STYLE_ATTR}] .gw-ritem-dot.is-brand { background: var(--dsw-alias-state-business-primary); }
 [${STYLE_ATTR}] .gw-ritem-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
 [${STYLE_ATTR}] .gw-ritem-alias {
-	font-family: var(--dsw-font-mono); font-size: 12px;
+	font-family: var(--dsw-font-mono); font-size: 12.5px;
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 [${STYLE_ATTR}] .gw-ritem.is-active .gw-ritem-alias { font-weight: 600; }
-[${STYLE_ATTR}] .gw-ritem-meta { font-size: 10.5px; color: var(--dsw-alias-label-caption); }
+[${STYLE_ATTR}] .gw-ritem-meta { font-size: 11px; color: var(--dsw-alias-label-tertiary); }
 [${STYLE_ATTR}] .gw-ritem-n {
-	flex: none; font-size: 10.5px; color: var(--dsw-alias-label-caption);
+	flex: none; font-size: 12px; color: var(--dsw-alias-label-tertiary);
 	font-variant-numeric: tabular-nums;
 }
 
 [${STYLE_ATTR}] .gw-routes-detail { display: flex; flex-direction: column; min-width: 0; }
 [${STYLE_ATTR}] .gw-dhead {
 	display: flex; align-items: center; gap: var(--gw-s2);
-	padding: 11px var(--gw-s4);
+	padding: 13px var(--gw-s4);
 	border-bottom: 1px solid var(--dsw-alias-border-l2);
 }
 [${STYLE_ATTR}] .gw-dhead-alias {
-	font-family: var(--dsw-font-mono); font-size: 14px; font-weight: 600;
+	font-family: var(--dsw-font-mono); font-size: 15px; font-weight: 600;
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 [${STYLE_ATTR}] .gw-dhead-actions { margin-left: auto; display: flex; gap: var(--gw-s2); flex: none; }
 
 /* Why the cursor is where it is. The steps can show the order; only this can
-   say that the first target refused and that is why the third one is serving. */
+   say that the first target refused and that is why the third one is serving.
+   Tinted rather than plain: it is an explanation, and the steps below it are
+   the evidence. */
 [${STYLE_ATTR}] .gw-dnote {
 	display: flex; align-items: flex-start; gap: var(--gw-s2);
 	margin: var(--gw-s3) var(--gw-s4) 0;
-	padding: 8px 10px;
+	padding: 9px 11px;
 	border-radius: var(--dsw-radius-sm);
 	border: 1px solid var(--dsw-alias-border-l2);
+	border-left: 2px solid var(--dsw-alias-state-business-primary);
 	background: var(--dsw-alias-bg-layer-2);
 	color: var(--dsw-alias-label-secondary);
 	font-size: 11.5px; line-height: 1.6;
 }
 [${STYLE_ATTR}] .gw-dnote-ico { color: var(--dsw-alias-state-business-primary); flex: none; }
-[${STYLE_ATTR}] .gw-dnote code { font-family: var(--dsw-font-mono); font-size: 11px; }
+[${STYLE_ATTR}] .gw-dnote code {
+	font-family: var(--dsw-font-mono); font-size: 11px;
+	color: var(--dsw-alias-label-primary);
+}
 
 /* Vertical order: the rail makes "falls through to" explicit without an arrow
    per row, and the note under each target has somewhere to live. */
 [${STYLE_ATTR}] .gw-steps { padding: var(--gw-s3) var(--gw-s4) 2px; display: grid; gap: 0; }
-[${STYLE_ATTR}] .gw-step { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: var(--gw-s2); }
+[${STYLE_ATTR}] .gw-step { display: grid; grid-template-columns: 26px minmax(0, 1fr); gap: 10px; }
 [${STYLE_ATTR}] .gw-step-rail { display: flex; flex-direction: column; align-items: center; }
 [${STYLE_ATTR}] .gw-step-idx {
-	width: 19px; height: 19px; flex: none; border-radius: 50%;
+	width: 20px; height: 20px; flex: none; border-radius: 50%;
 	display: inline-flex; align-items: center; justify-content: center;
 	font-size: 10px; font-weight: 600;
 	border: 1px solid var(--dsw-alias-border-l3);
 	color: var(--dsw-alias-label-tertiary);
 	font-variant-numeric: tabular-nums;
 }
-[${STYLE_ATTR}] .gw-step-line { width: 1px; flex: 1 1 auto; min-height: 10px; background: var(--dsw-alias-border-l2); margin: 3px 0; }
+[${STYLE_ATTR}] .gw-step-line {
+	width: 1px; flex: 1 1 auto; min-height: 12px;
+	background: var(--dsw-alias-border-l2); margin: 3px 0;
+}
 [${STYLE_ATTR}] .gw-step-body { padding-bottom: var(--gw-s3); min-width: 0; }
 [${STYLE_ATTR}] .gw-step-row { display: flex; align-items: center; gap: var(--gw-s2); min-width: 0; }
 [${STYLE_ATTR}] .gw-step-id {
-	font-family: var(--dsw-font-mono); font-size: 11.5px;
+	font-family: var(--dsw-font-mono); font-size: 12px;
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 [${STYLE_ATTR}] .gw-step-note {
-	margin-top: 2px; font-size: 11px;
-	color: var(--dsw-alias-label-caption); line-height: 1.5;
+	margin-top: 3px; font-size: 11px;
+	color: var(--dsw-alias-label-tertiary); line-height: 1.55;
 	overflow: hidden; text-overflow: ellipsis;
 }
-[${STYLE_ATTR}] .gw-step-note.is-bad { color: var(--dsw-alias-state-error-primary); opacity: 0.9; }
+[${STYLE_ATTR}] .gw-step-note.is-bad { color: var(--dsw-alias-state-error-primary); }
+
 [${STYLE_ATTR}] .gw-step-tag {
-	flex: none; font-size: 10px; line-height: 16px; padding: 0 6px;
+	flex: none; font-size: 10.5px; line-height: 18px; padding: 0 7px;
 	border-radius: var(--dsw-radius-xs); white-space: nowrap;
 	border: 1px solid var(--dsw-alias-border-l3);
 	color: var(--dsw-alias-label-tertiary);
 }
 [${STYLE_ATTR}] .gw-step-tag.is-primary {
 	color: var(--dsw-alias-state-business-primary);
-	border-color: var(--dsw-alias-state-business-primary);
+	background: var(--dsw-alias-bg-layer-2);
+	border-color: transparent;
 }
 [${STYLE_ATTR}] .gw-step-tag.is-cursor {
 	color: var(--dsw-alias-label-primary-foreground);
@@ -979,16 +994,23 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 [${STYLE_ATTR}] .gw-step-tag.is-gone {
 	color: var(--dsw-alias-state-error-primary);
 	border-color: var(--dsw-alias-state-error-primary);
+	background: var(--dsw-alias-bg-layer-2);
 }
-/* Only the step the next request starts at is filled in. Hop 1 used to carry the
-   fill, which was wrong the moment a failover moved the cursor past it: two
-   filled numbers say "start here" twice. */
+/* A faulting target is the loudest thing on the page: it is costing a round-trip
+   on every request, so its number is filled the same red as the tag beside it.
+   Only the step the next request starts at is filled blue — hop 1 used to carry
+   that fill, which was wrong the moment a failover moved the cursor past it. */
+[${STYLE_ATTR}] .gw-step.is-fault .gw-step-idx {
+	background: var(--dsw-alias-state-error-primary);
+	border-color: transparent;
+	color: var(--dsw-alias-label-primary-foreground);
+}
+[${STYLE_ATTR}] .gw-step.is-fault .gw-step-id { color: var(--dsw-alias-state-error-primary); }
 [${STYLE_ATTR}] .gw-step-idx.is-cursor {
 	border-color: transparent;
 	background: var(--dsw-alias-state-business-primary);
 	color: var(--dsw-alias-label-primary-foreground);
 }
-[${STYLE_ATTR}] .gw-step.is-fault .gw-step-id { color: var(--dsw-alias-state-error-primary); }
 [${STYLE_ATTR}] .gw-step.is-gone .gw-step-id {
 	color: var(--dsw-alias-label-caption);
 	text-decoration: line-through;
@@ -1001,9 +1023,9 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 
 [${STYLE_ATTR}] .gw-dfoot {
 	display: flex; align-items: center; gap: var(--gw-s2);
-	margin-top: auto; padding: 9px var(--gw-s4);
+	margin-top: auto; padding: 11px var(--gw-s4);
 	border-top: 1px solid var(--dsw-alias-border-l2);
-	font-size: 11px; color: var(--dsw-alias-label-caption);
+	font-size: 11.5px; color: var(--dsw-alias-label-caption);
 }
 [${STYLE_ATTR}] .gw-dfoot-warn { color: var(--dsw-alias-state-warn-label); }
 
