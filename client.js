@@ -181,6 +181,8 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"routes.moved": "{count} 条已轮换",
 			"routes.movedOne": "已轮换",
 			"routes.movedOneHint": "下一个请求从 {target} 开始",
+			"routes.detailMovedFrom": "（上一次由 {from} 服务）",
+			"routes.staleNote": "其中 {count} 个已不在目录里",
 			"routes.cursor": "当前使用",
 			"routes.cursorHint": "下一个请求从这条目标开始",
 			"routes.cursorMovedHint": "上一个请求由 {from} 服务，下一个从这条开始",
@@ -209,6 +211,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"routes.noMatch": "没有匹配的模型",
 			"routes.noMatchHint": "换个关键字，或点「全部」清除 provider 过滤。",
 			"routes.primaryHint": "首选，直接服务",
+			"routes.primarySkipped": "首选目标，当前已被轮换绕过",
 			"routes.fallbackHint": "第 {index} 顺位兜底",
 			"routes.orderHint": "顺序就是兜底顺序：第 1 个是首选，后面的依次顶上。拖动或按 ↑ ↓ 调整。",
 			"routes.needTarget": "至少选一个目标才能保存",
@@ -406,6 +409,8 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"routes.moved": "{count} rotated",
 			"routes.movedOne": "Rotated",
 			"routes.movedOneHint": "the next request starts at {target}",
+			"routes.detailMovedFrom": "(the last one was served by {from})",
+			"routes.staleNote": "{count} of them are no longer in the catalogue",
 			"routes.cursor": "in use",
 			"routes.cursorHint": "The next request starts at this target",
 			"routes.cursorMovedHint": "{from} served the last request; the next one starts here",
@@ -434,6 +439,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			"routes.noMatch": "No matching model",
 			"routes.noMatchHint": "Try another keyword, or click “All” to clear the provider filter.",
 			"routes.primaryHint": "primary, serves directly",
+			"routes.primarySkipped": "primary target, currently skipped by rotation",
 			"routes.fallbackHint": "fallback #{index}",
 			"routes.orderHint": "The order is the fallback order: the first target serves, the rest step up. Drag or use ↑ ↓ to reorder.",
 			"routes.needTarget": "Pick at least one target to save",
@@ -857,90 +863,149 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	border-bottom: 1px dotted var(--dsw-alias-state-warn-primary);
 }
 
-/* route grid: name / chain / health / actions */
-[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 150px minmax(0, 1fr) 106px 116px; }
-/* A route row is as tall as its chain, so centring its cells would strand the
-   name and the health badge halfway down a nine-target row while the actions
-   sat at the top. Every cell starts at the first hop instead. */
-[${STYLE_ATTR}] .gw-tbody > .gw-grid-route { align-items: start; }
-[${STYLE_ATTR}] .gw-tbody > .gw-grid-route > .gw-tcell { padding-top: 2px; }
+/* ---- routes: master / detail ----
+   A picker on the left, the chosen route's whole order on the right.
 
-/* ---- route rows ---- */
-[${STYLE_ATTR}] .gw-route-name { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
-[${STYLE_ATTR}] .gw-route-name code {
-	font-family: var(--dsw-font-mono); font-size: 12px; font-weight: 600;
+   The table this replaces had to fit name, chain, health and actions into one
+   row, so the chain stacked vertically inside a single wide cell: a four-target
+   route was five lines tall under a one-line header, and the 首选/备用 badges
+   sat at the far edge of that cell, a screen away from the target they described.
+   Splitting the tab in two gives the order room to read top to bottom and leaves
+   space under each target for the reason it was skipped. */
+[${STYLE_ATTR}] .gw-routes-split {
+	display: grid; grid-template-columns: 216px minmax(0, 1fr);
+	gap: var(--gw-s2); align-items: start;
+}
+[${STYLE_ATTR}] .gw-routes-list { padding: 5px; display: grid; gap: 2px; }
+[${STYLE_ATTR}] .gw-ritem {
+	display: flex; align-items: center; gap: var(--gw-s2);
+	padding: 8px 9px; min-width: 0;
+	border-radius: var(--dsw-radius-sm);
+	border: 1px solid transparent;
+	background: transparent; color: inherit; font: inherit;
+	text-align: left; cursor: pointer;
+}
+[${STYLE_ATTR}] .gw-ritem:hover { background: var(--dsw-alias-interactive-bg-hover); }
+[${STYLE_ATTR}] .gw-ritem:focus-visible { outline: var(--dsw-focus-ring-width) solid var(--dsw-focus-ring-color); outline-offset: -2px; }
+[${STYLE_ATTR}] .gw-ritem.is-active {
+	background: var(--dsw-alias-bg-layer-2);
+	border-color: var(--dsw-alias-border-l3);
+}
+[${STYLE_ATTR}] .gw-ritem-dot { width: 6px; height: 6px; border-radius: 50%; flex: none; background: var(--dsw-alias-state-idle-primary); }
+[${STYLE_ATTR}] .gw-ritem-dot.is-ok { background: var(--dsw-alias-state-success-primary); }
+[${STYLE_ATTR}] .gw-ritem-dot.is-bad { background: var(--dsw-alias-state-error-primary); }
+[${STYLE_ATTR}] .gw-ritem-dot.is-brand { background: var(--dsw-alias-state-business-primary); }
+[${STYLE_ATTR}] .gw-ritem-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
+[${STYLE_ATTR}] .gw-ritem-alias {
+	font-family: var(--dsw-font-mono); font-size: 12px;
 	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
-[${STYLE_ATTR}] .gw-route-name small { color: var(--dsw-alias-label-caption); font-size: 11px; }
-/* The row actions sit side by side and stay on the row's optical centre. Without
-   an explicit flex they stack as block boxes, which pushed 编辑 and 删除 onto two
-   lines and made the last column look detached from the row it belongs to.
-   The row is top-aligned (see .gw-grid-route), so the buttons line up with the
-   first hop without needing a nudge. */
-[${STYLE_ATTR}] .gw-row-actions {
-	display: flex; align-items: center; gap: var(--gw-s2);
-	flex-wrap: nowrap; justify-content: flex-end;
+[${STYLE_ATTR}] .gw-ritem.is-active .gw-ritem-alias { font-weight: 600; }
+[${STYLE_ATTR}] .gw-ritem-meta { font-size: 10.5px; color: var(--dsw-alias-label-caption); }
+[${STYLE_ATTR}] .gw-ritem-n {
+	flex: none; font-size: 10.5px; color: var(--dsw-alias-label-caption);
+	font-variant-numeric: tabular-nums;
 }
-[${STYLE_ATTR}] .gw-chain { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-[${STYLE_ATTR}] .gw-hop { display: flex; align-items: center; gap: 6px; min-width: 0; }
-[${STYLE_ATTR}] .gw-hop-idx {
-	width: 15px; height: 15px; flex: none;
+
+[${STYLE_ATTR}] .gw-routes-detail { display: flex; flex-direction: column; min-width: 0; }
+[${STYLE_ATTR}] .gw-dhead {
+	display: flex; align-items: center; gap: var(--gw-s2);
+	padding: 11px var(--gw-s4);
+	border-bottom: 1px solid var(--dsw-alias-border-l2);
+}
+[${STYLE_ATTR}] .gw-dhead-alias {
+	font-family: var(--dsw-font-mono); font-size: 14px; font-weight: 600;
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+[${STYLE_ATTR}] .gw-dhead-actions { margin-left: auto; display: flex; gap: var(--gw-s2); flex: none; }
+
+/* Why the cursor is where it is. The steps can show the order; only this can
+   say that the first target refused and that is why the third one is serving. */
+[${STYLE_ATTR}] .gw-dnote {
+	display: flex; align-items: flex-start; gap: var(--gw-s2);
+	margin: var(--gw-s3) var(--gw-s4) 0;
+	padding: 8px 10px;
+	border-radius: var(--dsw-radius-sm);
+	border: 1px solid var(--dsw-alias-border-l2);
+	background: var(--dsw-alias-bg-layer-2);
+	color: var(--dsw-alias-label-secondary);
+	font-size: 11.5px; line-height: 1.6;
+}
+[${STYLE_ATTR}] .gw-dnote-ico { color: var(--dsw-alias-state-business-primary); flex: none; }
+[${STYLE_ATTR}] .gw-dnote code { font-family: var(--dsw-font-mono); font-size: 11px; }
+
+/* Vertical order: the rail makes "falls through to" explicit without an arrow
+   per row, and the note under each target has somewhere to live. */
+[${STYLE_ATTR}] .gw-steps { padding: var(--gw-s3) var(--gw-s4) 2px; display: grid; gap: 0; }
+[${STYLE_ATTR}] .gw-step { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: var(--gw-s2); }
+[${STYLE_ATTR}] .gw-step-rail { display: flex; flex-direction: column; align-items: center; }
+[${STYLE_ATTR}] .gw-step-idx {
+	width: 19px; height: 19px; flex: none; border-radius: 50%;
 	display: inline-flex; align-items: center; justify-content: center;
-	border-radius: 50%; font-size: 10px; font-weight: 600;
+	font-size: 10px; font-weight: 600;
 	border: 1px solid var(--dsw-alias-border-l3);
 	color: var(--dsw-alias-label-tertiary);
 	font-variant-numeric: tabular-nums;
 }
-/* Only the hop the next request starts at is filled in. Hop 1 used to carry the
+[${STYLE_ATTR}] .gw-step-line { width: 1px; flex: 1 1 auto; min-height: 10px; background: var(--dsw-alias-border-l2); margin: 3px 0; }
+[${STYLE_ATTR}] .gw-step-body { padding-bottom: var(--gw-s3); min-width: 0; }
+[${STYLE_ATTR}] .gw-step-row { display: flex; align-items: center; gap: var(--gw-s2); min-width: 0; }
+[${STYLE_ATTR}] .gw-step-id {
+	font-family: var(--dsw-font-mono); font-size: 11.5px;
+	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+[${STYLE_ATTR}] .gw-step-note {
+	margin-top: 2px; font-size: 11px;
+	color: var(--dsw-alias-label-caption); line-height: 1.5;
+	overflow: hidden; text-overflow: ellipsis;
+}
+[${STYLE_ATTR}] .gw-step-note.is-bad { color: var(--dsw-alias-state-error-primary); opacity: 0.9; }
+[${STYLE_ATTR}] .gw-step-tag {
+	flex: none; font-size: 10px; line-height: 16px; padding: 0 6px;
+	border-radius: var(--dsw-radius-xs); white-space: nowrap;
+	border: 1px solid var(--dsw-alias-border-l3);
+	color: var(--dsw-alias-label-tertiary);
+}
+[${STYLE_ATTR}] .gw-step-tag.is-primary {
+	color: var(--dsw-alias-state-business-primary);
+	border-color: var(--dsw-alias-state-business-primary);
+}
+[${STYLE_ATTR}] .gw-step-tag.is-cursor {
+	color: var(--dsw-alias-label-primary-foreground);
+	background: var(--dsw-alias-state-business-primary);
+	border-color: transparent;
+}
+[${STYLE_ATTR}] .gw-step-tag.is-bad,
+[${STYLE_ATTR}] .gw-step-tag.is-gone {
+	color: var(--dsw-alias-state-error-primary);
+	border-color: var(--dsw-alias-state-error-primary);
+}
+/* Only the step the next request starts at is filled in. Hop 1 used to carry the
    fill, which was wrong the moment a failover moved the cursor past it: two
-   filled numbers say "start here" twice. A plain circle means "configured, but
-   not where the next request begins". */
-[${STYLE_ATTR}] .gw-hop-idx.is-cursor {
+   filled numbers say "start here" twice. */
+[${STYLE_ATTR}] .gw-step-idx.is-cursor {
 	border-color: transparent;
 	background: var(--dsw-alias-state-business-primary);
 	color: var(--dsw-alias-label-primary-foreground);
 }
-[${STYLE_ATTR}] .gw-hop-id {
-	/* Content-sized, not greedy: a failing hop puts its reason right after the
-	   target name, and a flex-grow id would shove that reason to the far edge
-	   where it reads as a column of its own. */
-	flex: 0 1 auto; min-width: 0;
-	font-family: var(--dsw-font-mono); font-size: 11.5px;
-	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
-/* The cursor hop: where the next request on this route starts. It is not a
-   fault, so it keeps full contrast and gets an arrow instead of a strike. */
-[${STYLE_ATTR}] .gw-hop.is-cursor .gw-hop-id { font-weight: 600; }
-/* A hop whose last request failed. It is not stale like is-gone — the target
-   still exists and is still being asked — so it gets the error colour and keeps
-   its normal weight, with the adapter's reason trailing it in smaller type. */
-[${STYLE_ATTR}] .gw-hop.is-fault .gw-hop-id {
-	color: var(--dsw-alias-state-error-primary);
-	text-decoration: underline;
-	text-decoration-style: dotted;
+[${STYLE_ATTR}] .gw-step.is-fault .gw-step-id { color: var(--dsw-alias-state-error-primary); }
+[${STYLE_ATTR}] .gw-step.is-gone .gw-step-id {
+	color: var(--dsw-alias-label-caption);
+	text-decoration: line-through;
 	text-decoration-color: var(--dsw-alias-state-error-primary);
 }
-[${STYLE_ATTR}] .gw-hop-why {
-	flex: 0 1 auto; min-width: 0;
-	font-size: 11px;
-	color: var(--dsw-alias-label-tertiary);
-	overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+[${STYLE_ATTR}] .gw-step.is-gone .gw-step-idx {
+	color: var(--dsw-alias-state-error-primary);
+	border-color: var(--dsw-alias-state-error-primary);
 }
-[${STYLE_ATTR}] .gw-hop.is-fault .gw-hop-why { color: var(--dsw-alias-state-error-primary); opacity: 0.85; }
-[${STYLE_ATTR}] .gw-hop-side { flex: none; display: inline-flex; align-items: center; gap: 5px; margin-left: auto; }
-/* Where the next request starts, said the way the account list says it: a small
-   dot and three words, no pill. A pill here read as a peer of 备用, and the
-   cursor is not a state of health — it is a position. */
-[${STYLE_ATTR}] .gw-cursor-mark {
-	flex: none; display: inline-flex; align-items: center; gap: 5px;
-	font-size: 11px; line-height: 1;
-	color: var(--dsw-alias-state-business-primary);
-	white-space: nowrap;
+
+[${STYLE_ATTR}] .gw-dfoot {
+	display: flex; align-items: center; gap: var(--gw-s2);
+	margin-top: auto; padding: 9px var(--gw-s4);
+	border-top: 1px solid var(--dsw-alias-border-l2);
+	font-size: 11px; color: var(--dsw-alias-label-caption);
 }
-[${STYLE_ATTR}] .gw-cursor-mark::before {
-	content: ""; width: 5px; height: 5px; border-radius: 50%;
-	flex: none; background: currentColor;
-}
+[${STYLE_ATTR}] .gw-dfoot-warn { color: var(--dsw-alias-state-warn-label); }
 
 /* ---- badges ---- */
 [${STYLE_ATTR}] .gw-badge {
@@ -982,12 +1047,6 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	border-color: var(--dsw-alias-border-l3);
 	border-style: dashed;
 	background: transparent;
-}
-[${STYLE_ATTR}] .gw-hop.is-gone .gw-hop-id {
-	color: var(--dsw-alias-label-caption);
-	text-decoration: line-through;
-	text-decoration-style: dotted;
-	text-decoration-color: var(--dsw-alias-border-l3);
 }
 
 /* ---- forms ---- */
@@ -1529,6 +1588,20 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	color: var(--dsw-alias-label-caption);
 	display: inline-flex; align-items: center;
 }
+/* The editor's own numbering. It used to borrow the overview chain's index
+   class; that class is gone with the table, and this row has its own scale. */
+[${STYLE_ATTR}] .gw-chain-idx {
+	width: 15px; height: 15px; flex: none;
+	display: inline-flex; align-items: center; justify-content: center;
+	border-radius: 50%; font-size: 10px; font-weight: 600;
+	border: 1px solid var(--dsw-alias-border-l3);
+	color: var(--dsw-alias-label-tertiary);
+	font-variant-numeric: tabular-nums;
+}
+[${STYLE_ATTR}] .gw-chain-idx.is-first {
+	border-color: var(--dsw-alias-state-business-primary);
+	color: var(--dsw-alias-state-business-primary);
+}
 [${STYLE_ATTR}] .gw-chain-main { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1 1 auto; }
 [${STYLE_ATTR}] .gw-chain-id-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; min-width: 0; }
 [${STYLE_ATTR}] .gw-chain-id {
@@ -1611,7 +1684,10 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(3),
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(4),
 	[${STYLE_ATTR}] .gw-grid-recent > :nth-child(5) { display: none; }
-	[${STYLE_ATTR}] .gw-grid-route { grid-template-columns: 118px minmax(0, 1fr) 90px 112px; }
+	/* The picker goes above the detail rather than beside it: at this width a
+	   216px column would leave the steps too narrow to show a target id. */
+	[${STYLE_ATTR}] .gw-routes-split { grid-template-columns: minmax(0, 1fr); }
+	[${STYLE_ATTR}] .gw-ritem-meta { display: none; }
 	[${STYLE_ATTR}] .gw-kv { align-items: flex-start; flex-direction: column; }
 	[${STYLE_ATTR}] .gw-kv-ctl { max-width: 100%; width: 100%; }
 	/* Stacked, the row is free to wrap the address onto its own line rather than
@@ -1839,6 +1915,10 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 			// a hook above it would shift every slot below it.
 			const [usagePage, setUsagePage] = useState(1);
 			const [clearingUsage, setClearingUsage] = useState(false);
+			// Which route the master-detail panel is showing. Null means "whichever
+			// is first", so a fresh load, or the deletion of the selected route,
+			// both land on something real instead of an empty pane.
+			const [routeFocus, setRouteFocus] = useState(null);
 
 			// One same-origin read: the status document carries the whole catalog.
 			// `/v1/models` lives on the gateway's own port, so asking for it from
@@ -2814,69 +2894,100 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 					),
 				);
 
-			/** One hop of a route chain: index, id, and whether it is the cursor. */
-			const routeHop = (target, index, cursor) => {
+			/**
+			 * One step of a route chain, as the detail pane draws it.
+			 *
+			 * A vertical rail rather than a horizontal row of chips: the order *is*
+			 * the semantics here (this one, then this one, then this one), and a
+			 * column reads as a sequence without needing an arrow to explain it.
+			 * It also leaves room under each target for the reason it was skipped,
+			 * which a chip has nowhere to put.
+			 */
+			const routeStep = (target, index, cursor, last) => {
 				const gone = isUnavailable(target);
-				// A target that refused its last request is the loudest state a hop
+				// A target that refused its last request is the loudest state a step
 				// can be in: a retired row is merely stale, while this one is being
-				// asked and answering with an error. It outranks the cursor badge,
-				// because "the next request starts here" is not news when here is
-				// broken.
+				// asked and answering with an error. It outranks the cursor, because
+				// "the next request starts here" is not news when here is broken.
 				const fault = gone ? undefined : faultFor(target);
 				const isFault = fault !== undefined;
-				// The cursor marks where the *next* request starts, which after a
-				// failover is no longer hop 1 — that is the whole point of showing
-				// it. A retired target still outranks it, because a stale row never
-				// recovers on its own while a cursor is normal operation.
 				const isCursor = !gone && !isFault && cursor?.next === target;
-				const movedFrom = isCursor && cursor?.movedFrom !== undefined && cursor.movedFrom !== target ? cursor.movedFrom : null;
+				const movedFrom =
+					isCursor && cursor?.movedFrom !== undefined && cursor.movedFrom !== target ? cursor.movedFrom : null;
+
+				const tag = gone
+					? h("span", { className: "gw-step-tag is-gone", title: t("routes.unavailableHint") }, t("routes.unavailable"))
+					: isFault
+						? h(
+								"span",
+								{
+									className: "gw-step-tag is-bad",
+									title:
+										fault.message === undefined
+											? t("routes.faultHint")
+											: fill(t("routes.faultHint"), { reason: fault.message }),
+								},
+								t("routes.fault"),
+							)
+						: isCursor
+							? h(
+									"span",
+									{
+										className: "gw-step-tag is-cursor",
+										title: movedFrom === null ? t("routes.cursorHint") : fill(t("routes.cursorMovedHint"), { from: movedFrom }),
+									},
+									t("routes.cursor"),
+								)
+							: index === 0
+								? h("span", { className: "gw-step-tag is-primary" }, t("routes.primary"))
+								: h("span", { className: "gw-step-tag is-idle" }, t("routes.fallback"));
+
+				// The line under each target says what it means for the *next*
+				// request. A stale row and a refusing row say different things and
+				// need different fixes, so they must not share a sentence.
+				//
+				// Two cases deliberately say nothing: the cursor step (the tag and
+				// the banner above already say where the next request starts, and a
+				// third copy of that is noise) and a route with one target.
+				const note = gone
+					? t("routes.unavailableHint")
+					: isFault
+						? (fault.reason ?? fault.message ?? t("routes.faultHint"))
+						: isCursor
+							? null
+							: index === 0
+								? cursor === undefined
+									? t("routes.primaryHint")
+									: t("routes.primarySkipped")
+								: fill(t("routes.fallbackHint"), { index: index + 1 });
+
 				return h(
 					"div",
 					{
-						className: `gw-hop ${isCursor ? "is-cursor" : ""} ${isFault ? "is-fault" : ""} ${gone ? "is-gone" : ""}`,
+						className: `gw-step ${isCursor ? "is-cursor" : ""} ${isFault ? "is-fault" : ""} ${gone ? "is-gone" : ""}`,
 						key: target,
 					},
-					h("span", { className: `gw-hop-idx ${index === 0 ? "is-first" : ""} ${isCursor ? "is-cursor" : ""}` }, String(index + 1)),
-					h("span", { className: "gw-hop-id", title: target }, target),
-					isFault
-						? h("span", { className: "gw-hop-why", title: fault.message ?? "" }, fault.reason ?? "")
-						: null,
-					gone
-						? h(
-								"span",
-								{ className: "gw-hop-side" },
-								h("span", { className: "gw-badge is-gone", title: t("routes.unavailableHint") }, t("routes.unavailable")),
-							)
-						: isFault
-						? h(
-								"span",
-								{ className: "gw-hop-side" },
-								h(
-									"span",
-									{
-										className: "gw-badge is-bad",
-										title: fault.message === undefined ? t("routes.faultHint") : fill(t("routes.faultHint"), { reason: fault.message }),
-									},
-									t("routes.fault"),
-								),
-							)
-						: isCursor
-						? h(
-								"span",
-								{ className: "gw-hop-side" },
-								h(
-									"span",
-									{ className: "gw-cursor-mark", title: movedFrom === null ? t("routes.cursorHint") : fill(t("routes.cursorMovedHint"), { from: movedFrom }) },
-									t("routes.cursor"),
-								),
-							)
-						: h(
-								"span",
-								{ className: "gw-hop-side" },
-								index === 0
-									? h("span", { className: "gw-badge is-brand" }, t("routes.primary"))
-									: h("span", { className: "gw-badge is-idle" }, t("routes.fallback")),
-							),
+					h(
+						"div",
+						{ className: "gw-step-rail" },
+						h(
+							"span",
+							{ className: `gw-step-idx ${index === 0 ? "is-first" : ""} ${isCursor ? "is-cursor" : ""}` },
+							String(index + 1),
+						),
+						last ? null : h("span", { className: "gw-step-line" }),
+					),
+					h(
+						"div",
+						{ className: "gw-step-body" },
+						h(
+							"div",
+							{ className: "gw-step-row" },
+							h("span", { className: "gw-step-id", title: target }, target),
+							tag,
+						),
+						note === null ? null : h("div", { className: `gw-step-note ${isFault ? "is-bad" : ""}` }, note),
+					),
 				);
 			};
 
@@ -3045,7 +3156,7 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 							},
 						},
 						h("span", { className: "gw-chain-grip", title: t("routes.dragHint") }, gripIcon()),
-						h("span", { className: `gw-hop-idx ${index === 0 ? "is-first" : ""}` }, String(index + 1)),
+						h("span", { className: `gw-chain-idx ${index === 0 ? "is-first" : ""}` }, String(index + 1)),
 						h(
 							"div",
 							{ className: "gw-chain-main" },
@@ -3334,6 +3445,30 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 
 			const routesPanel = () => {
 				const healthy = movedCount === 0 && faultCount === 0;
+				// Null focus means "the first route": a fresh load, or the deletion
+				// of the selected route, both land on something real.
+				const focused = aliasRows.find((row) => row.alias === routeFocus) ?? aliasRows[0];
+				const focusedCursor = focused === undefined ? undefined : cursorFor(focused.alias);
+				const focusedGone =
+					focused === undefined ? 0 : focused.targets.filter((target) => isUnavailable(target)).length;
+				const focusedBroken =
+					focused === undefined ? 0 : focused.targets.filter((target) => faultFor(target) !== undefined).length;
+
+				/**
+				 * One route's health as a tone and a sentence.
+				 *
+				 * Shared by the list entry and the detail header on purpose: they
+				 * describe the same route, and the table version's worst habit was
+				 * letting the row badge and the hop badges drift into contradicting
+				 * each other.
+				 */
+				const healthOf = (cursor, gone, broken) => {
+					if (gone > 0) return { tone: "is-bad", text: fill(t("routes.goneCount"), { count: gone }) };
+					if (broken > 0) return { tone: "is-bad", text: fill(t("routes.faultCount"), { count: broken }) };
+					if (cursor !== undefined) return { tone: "is-brand", text: t("routes.movedOne") };
+					return { tone: "is-ok", text: t("routes.healthy") };
+				};
+
 				return h(
 					"div",
 					{ className: `gw-panel ${tab === "routes" ? "is-active" : ""}`, key: "routes" },
@@ -3377,81 +3512,103 @@ const USAGE_PATH = "/plugins/dsh-openai-gateway/usage";
 							? h("div", { className: "gw-card gw-empty" }, t("page.aliasEmpty"))
 							: h(
 									"div",
-									{ className: "gw-table" },
+									{ className: "gw-routes-split" },
+									// ---- the picker: one line per route, enough to choose by
 									h(
 										"div",
-										{ className: "gw-trow gw-thead gw-grid-route" },
-										h("span", null, t("routes.name")),
-										h("span", null, t("routes.chain")),
-										h("span", null, t("routes.health")),
-										h("span", null, ""),
-									),
-									h(
-										"div",
-										{ className: "gw-tbody" },
-										aliasRows.map((row) => {
+										{ className: "gw-card gw-routes-list" },
+										...aliasRows.map((row) => {
 											const cursor = cursorFor(row.alias);
 											const gone = row.targets.filter((target) => isUnavailable(target)).length;
-											// A target that just refused is the row's most important
-											// fact: it is the one costing a round-trip on every
-											// request, and the only one the user can fix.
 											const broken = row.targets.filter((target) => faultFor(target) !== undefined).length;
-											// A dead target outranks a moved cursor: a cursor is
-											// normal operation, a stale row needs the user to edit it.
-											const moved = cursor !== undefined;
-											const tone = gone > 0 || broken > 0 ? "is-bad" : moved ? "is-brand" : "is-ok";
-											const health =
-												gone > 0
-													? fill(t("routes.goneCount"), { count: gone })
-													: broken > 0
-														? fill(t("routes.faultCount"), { count: broken })
-														: moved
-															? t("routes.movedOne")
-															: t("routes.healthy");
-											// The cell is 106px wide, so the target the cursor moved to
-											// lives in the tooltip: naming it inline wrapped the row.
-											const healthHint =
-												moved && cursor.next !== undefined ? fill(t("routes.movedOneHint"), { target: cursor.next }) : undefined;
+											const health = healthOf(cursor, gone, broken);
+											const active = focused !== undefined && focused.alias === row.alias;
 											return h(
-												"div",
-												{ className: "gw-trow gw-grid-route", key: row.alias },
+												"button",
+												{
+													type: "button",
+													key: row.alias,
+													className: `gw-ritem ${active ? "is-active" : ""}`,
+													"aria-pressed": active ? "true" : "false",
+													onClick: () => setRouteFocus(row.alias),
+												},
+												h("span", {
+													className: `gw-ritem-dot ${gone > 0 || broken > 0 ? "is-bad" : cursor !== undefined ? "is-brand" : "is-ok"}`,
+												}),
 												h(
-													"div",
-													{ className: "gw-route-name" },
-													h("code", { title: row.alias }, row.alias),
-													h("small", null, fill(t("routes.count"), { count: row.targets.length })),
+													"span",
+													{ className: "gw-ritem-main" },
+													h("span", { className: "gw-ritem-alias", title: row.alias }, row.alias),
+													h("span", { className: "gw-ritem-meta" }, health.text),
 												),
-												h(
-													"div",
-													{ className: "gw-chain" },
-													...row.targets.map((target, index) => routeHop(target, index, cursor)),
-												),
-												h(
-													"div",
-													{ className: "gw-tcell" },
-													h("span", { className: `gw-badge ${tone}`, title: healthHint }, health),
-												),
-												h(
-													"div",
-													{ className: "gw-row-actions" },
-													h(
-														"button",
-														{
-															type: "button",
-															className: "gw-btn is-sm",
-															onClick: () => openEditor("edit", row),
-														},
-														t("routes.edit"),
-													),
-													h(
-														"button",
-														{ type: "button", className: "gw-btn is-sm is-danger", onClick: () => removeAlias(row.alias) },
-														t("page.aliasRemove"),
-													),
-												),
+												h("span", { className: "gw-ritem-n" }, String(row.targets.length)),
 											);
 										}),
 									),
+									// ---- the detail: the whole order, with a reason per step
+									focused === undefined
+										? h("div", { className: "gw-card gw-empty" }, t("page.aliasEmpty"))
+										: h(
+												"div",
+												{ className: "gw-card gw-routes-detail" },
+												h(
+													"div",
+													{ className: "gw-dhead" },
+													h("span", { className: "gw-dhead-alias", title: focused.alias }, focused.alias),
+													h(
+														"span",
+														{ className: `gw-badge ${healthOf(focusedCursor, focusedGone, focusedBroken).tone}` },
+														healthOf(focusedCursor, focusedGone, focusedBroken).text,
+													),
+													h(
+														"div",
+														{ className: "gw-dhead-actions" },
+														h(
+															"button",
+															{ type: "button", className: "gw-btn is-sm", onClick: () => openEditor("edit", focused) },
+															t("routes.edit"),
+														),
+														h(
+															"button",
+															{ type: "button", className: "gw-btn is-sm is-danger", onClick: () => removeAlias(focused.alias) },
+															t("page.aliasRemove"),
+														),
+													),
+												),
+												// The banner explains the one fact the steps cannot: why the
+												// cursor is where it is. Only when there is something to say.
+												focusedCursor === undefined
+													? null
+													: h(
+															"div",
+															{ className: "gw-dnote" },
+															h("span", { className: "gw-dnote-ico" }, "↻"),
+															h(
+																"span",
+																null,
+																fill(t("routes.movedOneHint"), { target: focusedCursor.next ?? "—" }),
+																focusedCursor.movedFrom === undefined ? null : [
+																		" ",
+																		fill(t("routes.detailMovedFrom"), { from: focusedCursor.movedFrom }),
+																	],
+															),
+														),
+												h(
+													"div",
+													{ className: "gw-steps" },
+													...focused.targets.map((target, index) =>
+														routeStep(target, index, focusedCursor, index === focused.targets.length - 1),
+													),
+												),
+												h(
+													"div",
+													{ className: "gw-dfoot" },
+													h("span", null, fill(t("routes.targetCount"), { count: focused.targets.length })),
+													focusedGone === 0
+														? null
+														: h("span", { className: "gw-dfoot-warn" }, fill(t("routes.staleNote"), { count: focusedGone })),
+												),
+											),
 								),
 						noticeFor("alias"),
 					),

@@ -435,7 +435,7 @@ await check('a multi-target alias renders every target, in try order', () => {
   const rendered = collect(tree)
   assert.ok(rendered.includes('deepseek-flash'), 'the alias name is missing')
 
-  /* Every target is present, and each hop carries its 1-based try position.
+  /* Every target is present, and each step carries its 1-based try position.
      The position is what replaces the old "→ " prefix: it says the same thing
      (this is a fallback, tried later) without relying on a glyph. */
   const hops = []
@@ -446,7 +446,7 @@ await check('a multi-target alias renders every target, in try order', () => {
       return
     }
     const className = node.props?.className
-    if (typeof className === 'string' && className.split(' ').includes('gw-hop')) {
+    if (typeof className === 'string' && className.split(' ').includes('gw-step')) {
       const inner = collect(node)
       /* The index badge is a nested span; `is-first` lives there. */
       let idxClass = ''
@@ -458,8 +458,8 @@ await check('a multi-target alias renders every target, in try order', () => {
           return
         }
         const cls = child.props?.className
-        if (typeof cls === 'string' && cls.split(' ').includes('gw-hop-idx')) idxClass = cls
-        if (typeof cls === 'string' && cls.split(' ').includes('gw-badge')) badge = collect(child).join('')
+        if (typeof cls === 'string' && cls.split(' ').includes('gw-step-idx')) idxClass = cls
+        if (typeof cls === 'string' && cls.split(' ').includes('gw-step-tag')) badge = collect(child).join('')
         for (const grandchild of child.children ?? []) scan(grandchild)
       }
       scan(node)
@@ -475,7 +475,7 @@ await check('a multi-target alias renders every target, in try order', () => {
   }
   walk(tree)
 
-  assert.equal(hops.length, 3, `expected 3 hops; saw ${hops.length}`)
+  assert.equal(hops.length, 3, `expected 3 steps; saw ${hops.length}`)
   assert.deepEqual(
     hops.map((hop) => hop.target),
     [
@@ -512,8 +512,8 @@ await check('a rotated route is marked in the chain', () => {
   })
   assert.ok(classes(tree).has('is-cursor'), 'no target was marked as the rotation cursor')
 
-  /* The hop the cursor sits on carries the marker on its own number too. After
-     a failover the cursor is not hop 1, so colouring only hop 1 would point at
+  /* The step the cursor sits on carries the marker on its own number too. After
+     a failover the cursor is not step 1, so colouring only step 1 would point at
      the wrong target — the blue index has to move with it. */
   const marks = []
   const walk = (node) => {
@@ -523,7 +523,7 @@ await check('a rotated route is marked in the chain', () => {
       return
     }
     const cls = node.props?.className
-    if (typeof cls === 'string' && cls.split(' ').includes('gw-hop-idx')) marks.push(cls)
+    if (typeof cls === 'string' && cls.split(' ').includes('gw-step-idx')) marks.push(cls)
     for (const child of node.children ?? []) walk(child)
   }
   walk(tree)
